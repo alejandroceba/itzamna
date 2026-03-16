@@ -6,13 +6,14 @@
 import serial
 import serial.tools.list_ports
 import matplotlib.pyplot as plt
-from matplotlib.animation import Animation
+import matplotlib.animation as animation
 from collections import deque
 import csv
 from datetime import datetime
 import os
 
 # --- INTERACTIVE BACKEND ---
+# This is required for plots to render inside VS Code Interactive Window
 %matplotlib widget
 
 # --- CONFIGURATION ---
@@ -22,10 +23,14 @@ UNITS = ["#", "m", "dBm", "dBm", "%", "kbps", "val", "°C", "V", "A"]
 MAX_POINTS = 50
 LOG_FILE = "../data/esp32_telemetry_secure.csv"
 
+# Ensure the data directory exists
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
 def find_esp32_port():
     """Auto-detects ESP32/XIAO on Windows, Mac, or Linux."""
     ports = serial.tools.list_ports.comports()
     for port in ports:
+        # Detect common USB-Serial device identifiers
         if any(key in port.description for key in ["CP210", "USB", "UART", "JTAG", "ACM"]):
             print(f"✅ Found ESP32 on {port.device}")
             return port.device
@@ -38,7 +43,7 @@ if not port_name:
 
 ser = serial.Serial(port_name, 115200, timeout=0.01)
 
-# Data buffers
+# Data buffers for plotting
 time_buffer = deque([""]*MAX_POINTS, maxlen=MAX_POINTS)
 data_buffers = [deque([0.0]*MAX_POINTS, maxlen=MAX_POINTS) for _ in range(NUM_VARS)]
 
@@ -66,8 +71,8 @@ for i, ax in enumerate(axs_flat):
 axs[4, 0].set_xlabel("Timestamp")
 axs[4, 1].set_xlabel("Timestamp")
 
-# --- LOGIC ---
-def update_plot():
+# --- ANIMATION UPDATE LOGIC ---
+def update_plot(frame):
     if ser.in_waiting:
         try:
             line_data = ser.readline().decode('utf-8').strip()
@@ -79,20 +84,20 @@ def update_plot():
                 ts_full = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 ts_short = now.strftime("%H:%M:%S")
 
-                # 1. SECURE CSV WRITE (Immediate Flush)
+                # 1. SECURE CSV WRITE (Immediate Flush to Disk)
                 with open(LOG_FILE, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([ts_full] + float_vals)
                     f.flush()
-                    os.fsync(f.fileno()) # Forces OS to write to disk
+                    os.fsync(f.fileno()) # Forces OS to physical write
 
-                # 2. UPDATE BUFFERS
+                # 2. UPDATE PLOT BUFFERS
                 time_buffer.append(ts_short)
                 for i in range(NUM_VARS):
                     data_buffers[i].append(float_vals[i])
                     lines[i].set_ydata(list(data_buffers[i]))
                     
-                    # Independent Y-scaling
+                    # Auto-scale each Y-axis independently
                     axs_flat[i].relim()
                     axs_flat[i].autoscale_view()
 
@@ -102,19 +107,19 @@ def update_plot():
                 axs_flat[8].set_xticklabels([time_buffer[j] for j in indices], rotation=45, fontsize='x-small')
                 axs_flat[9].set_xticks(indices)
                 axs_flat[9].set_xticklabels([time_buffer[j] for j in indices], rotation=45, fontsize='x-small')
-
-                fig.canvas.draw()
-                fig.canvas.flush_events()
         except Exception:
             pass
+    return lines
 
-# --- RUN LOOP ---
+# --- RUN ANIMATION ---
+# FuncAnimation is the non-blocking way to update graphs in Jupyter/VS Code
 print(f"🚀 Streaming data to {LOG_FILE}...")
-try:
-    while True:
-        update_plot()
-except KeyboardInterrupt:
-    print("🛑 Stream Stopped by User.")
-finally:
-    ser.close()
-    print("🔌 Serial Port Closed Safely.")
+ani = animation.FuncAnimation(
+    fig, 
+    update_plot, 
+    interval=50, 
+    blit=False, 
+    cache_frame_data=False
+)
+
+plt.show()
