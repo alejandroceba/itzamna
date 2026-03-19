@@ -1,6 +1,24 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <DallasTemperature.h>
+#include <Adafruit_BME280.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <DFRobot_BMI160.h>
+#include <SPI.h>
+
+#define DS18_PIN 4
+
+// I2C BMI160
+#define SDA_PIN 5
+#define SCL_PIN 6
+
+// spi BME280
+#define BME_CS 2
+#define BME_SCK 7
+#define BME_MOSI 9
+#define BME_MISO 8
 
 #define PROTOCOL_VERSION 1
 #define WIFI_CHANNEL 6

@@ -11,15 +11,52 @@ from collections import deque
 import csv
 from datetime import datetime
 import os
+import math
 
 # --- INTERACTIVE BACKEND ---
 # This is required for plots to render inside VS Code Interactive Window
 %matplotlib widget
 
 # --- CONFIGURATION ---
-NUM_VARS = 10
-LABELS = ["Pkt#", "Dist(m)", "RSSI", "SmthRSSI", "Loss%", "Kbps", "P", "Temp", "V", "A"]
-UNITS = ["#", "m", "dBm", "dBm", "%", "kbps", "val", "°C", "V", "A"]
+LABELS = [
+    "Packet #",
+    "Distance",
+    "RSSI",
+    "Smoothed RSSI",
+    "Loss Rate",
+    "Throughput",
+    "Temp BME280",
+    "Temp DS18B20",
+    "Pressure",
+    "Altitude",
+    "Velocity X",
+    "Velocity Y",
+    "Velocity Z",
+    "Accel X",
+    "Accel Y",
+    "Accel Z",
+]
+UNITS = [
+    "#",
+    "m",
+    "dBm",
+    "dBm",
+    "%",
+    "kbps",
+    "degC",
+    "degC",
+    "hPa",
+    "m",
+    "m/s",
+    "m/s",
+    "m/s",
+    "m/s^2",
+    "m/s^2",
+    "m/s^2",
+]
+NUM_VARS = len(LABELS)
+NUM_COLS = 2
+NUM_ROWS = math.ceil(NUM_VARS / NUM_COLS)
 MAX_POINTS = 50
 LOG_FILE = "../data/esp32_telemetry_secure.csv"
 
@@ -55,31 +92,47 @@ if not os.path.exists(LOG_FILE):
 
 # --- UI SETUP ---
 # sharex=True ensures all graphs stay aligned in time
-fig, axs = plt.subplots(5, 2, figsize=(12, 10), sharex=True)
+fig, axs = plt.subplots(NUM_ROWS, NUM_COLS, figsize=(14, 2.1 * NUM_ROWS), sharex=True)
 plt.subplots_adjust(hspace=0.4, bottom=0.15)
 axs_flat = axs.flatten()
 lines = []
 
-for i, ax in enumerate(axs_flat):
+for i, ax in enumerate(axs_flat[:NUM_VARS]):
     line, = ax.plot(range(MAX_POINTS), data_buffers[i], label=LABELS[i], color=f"C{i}")
     lines.append(line)
     ax.set_ylabel(UNITS[i], fontsize='small')
     ax.legend(loc="upper left", fontsize='xx-small')
     ax.grid(True, alpha=0.2)
 
+# Hide any unused axes when the grid has extra cells
+for ax in axs_flat[NUM_VARS:]:
+    ax.set_visible(False)
+
 # Set X-labels on the bottom row only
-axs[4, 0].set_xlabel("Timestamp")
-axs[4, 1].set_xlabel("Timestamp")
+bottom_row_start = (NUM_ROWS - 1) * NUM_COLS
+for idx in range(bottom_row_start, min(bottom_row_start + NUM_COLS, NUM_VARS)):
+    axs_flat[idx].set_xlabel("Timestamp")
+
+
+def parse_csv_line(line_data):
+    """Parse a CSV line from receiver.ino; return float list or None if invalid/header."""
+    values = line_data.split(',')
+    if len(values) != NUM_VARS:
+        return None
+    try:
+        return [float(v) for v in values]
+    except ValueError:
+        # Header or status text line
+        return None
 
 # --- ANIMATION UPDATE LOGIC ---
 def update_plot(frame):
     if ser.in_waiting:
         try:
             line_data = ser.readline().decode('utf-8').strip()
-            values = line_data.split(',')
-            
-            if len(values) == NUM_VARS:
-                float_vals = [float(v) for v in values]
+            float_vals = parse_csv_line(line_data)
+
+            if float_vals is not None:
                 now = datetime.now()
                 ts_full = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 ts_short = now.strftime("%H:%M:%S")
@@ -103,10 +156,13 @@ def update_plot(frame):
 
                 # 3. UPDATE X-AXIS TICKS
                 indices = range(0, MAX_POINTS, 10)
-                axs_flat[8].set_xticks(indices)
-                axs_flat[8].set_xticklabels([time_buffer[j] for j in indices], rotation=45, fontsize='x-small')
-                axs_flat[9].set_xticks(indices)
-                axs_flat[9].set_xticklabels([time_buffer[j] for j in indices], rotation=45, fontsize='x-small')
+                for idx in range(bottom_row_start, min(bottom_row_start + NUM_COLS, NUM_VARS)):
+                    axs_flat[idx].set_xticks(indices)
+                    axs_flat[idx].set_xticklabels(
+                        [time_buffer[j] for j in indices],
+                        rotation=45,
+                        fontsize='x-small'
+                    )
         except Exception:
             pass
     return lines
