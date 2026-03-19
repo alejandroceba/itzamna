@@ -5,3 +5,4 @@ Itzamná IER-UNAM
 
 agregar alineamiento, rafaga
 
+18 dBm

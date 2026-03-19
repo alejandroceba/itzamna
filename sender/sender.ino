@@ -36,7 +36,7 @@ uint8_t receiverMAC[] = {0xD8, 0x3B, 0xDA, 0x45, 0xCD, 0x24};  // Receiver MAC a
 // BMI160 (I2C accelerometer/gyroscope)
 #define SDA_PIN 5
 #define SCL_PIN 6
-//const int8_t BMI160_I2C_ADDR = 0x68;
+// const int8_t BMI160_I2C_ADDR = 0x68;
 
 // BME280 (SPI barometric/temperature sensor)
 #define BME_CS 2
