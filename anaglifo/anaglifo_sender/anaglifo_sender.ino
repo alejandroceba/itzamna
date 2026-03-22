@@ -7,7 +7,6 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
-#include <esp_heap_caps.h>
 
 // ================= CONFIG =================
 static const int BTN_PIN = D2;
@@ -316,7 +315,19 @@ bool initEspNow() {
   return true;
 }
 
-bool sendImageOverEspNow(const uint8_t *rightGray, uint16_t width, uint16_t height, uint16_t imageId) {
+bool sendImageOverEspNow(camera_fb_t *fb, uint16_t imageId) {
+  if (!fb) return false;
+
+  uint32_t expectedLen = (uint32_t)fb->width * fb->height * 2;
+  if (fb->len != expectedLen) {
+    Serial.printf("[SENDER] Unexpected frame len=%u expected=%u\n",
+                  (unsigned)fb->len,
+                  (unsigned)expectedLen);
+    return false;
+  }
+
+  uint16_t width = fb->width;
+  uint16_t height = fb->height;
   uint32_t dataLen = (uint32_t)width * height;
 
   BeginPacket beginPacket{};
@@ -336,19 +347,37 @@ bool sendImageOverEspNow(const uint8_t *rightGray, uint16_t width, uint16_t heig
   uint16_t totalChunks = (dataLen + CHUNK_PAYLOAD - 1) / CHUNK_PAYLOAD;
   uint8_t packet[1 + 2 + 2 + 2 + CHUNK_PAYLOAD];
 
-  for (uint16_t chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-    uint32_t offset = (uint32_t)chunkIndex * CHUNK_PAYLOAD;
-    uint16_t n = CHUNK_PAYLOAD;
+  uint16_t chunkIndex = 0;
+  uint16_t n = 0;
 
-    if (offset + n > dataLen) {
-      n = dataLen - offset;
+  for (uint32_t i = 0; i < fb->len; i += 2) {
+    uint16_t p = ((uint16_t)fb->buf[i] << 8) | fb->buf[i + 1];
+    packet[7 + n] = rgb565ToGray(p);
+    n++;
+
+    if (n == CHUNK_PAYLOAD) {
+      packet[0] = PKT_CHUNK;
+      memcpy(&packet[1], &imageId, sizeof(imageId));
+      memcpy(&packet[3], &chunkIndex, sizeof(chunkIndex));
+      memcpy(&packet[5], &n, sizeof(n));
+
+      size_t sendLen = 7 + n;
+      if (!sendPacketWithRetry(packet, sendLen)) {
+        Serial.printf("[SENDER] Failed chunk %u/%u\n", chunkIndex + 1, totalChunks);
+        return false;
+      }
+
+      chunkIndex++;
+      n = 0;
+      delay(2);
     }
+  }
 
+  if (n > 0) {
     packet[0] = PKT_CHUNK;
     memcpy(&packet[1], &imageId, sizeof(imageId));
     memcpy(&packet[3], &chunkIndex, sizeof(chunkIndex));
     memcpy(&packet[5], &n, sizeof(n));
-    memcpy(&packet[7], rightGray + offset, n);
 
     size_t sendLen = 7 + n;
     if (!sendPacketWithRetry(packet, sendLen)) {
@@ -356,7 +385,7 @@ bool sendImageOverEspNow(const uint8_t *rightGray, uint16_t width, uint16_t heig
       return false;
     }
 
-    delay(2);
+    chunkIndex++;
   }
 
   EndPacket endPacket{};
@@ -374,8 +403,8 @@ bool sendImageOverEspNow(const uint8_t *rightGray, uint16_t width, uint16_t heig
 }
 
 // ================= GRAYSCALE BUFFER =================
-bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
-  if (!fb || !outGray) return false;
+bool validateRgb565Frame(camera_fb_t *fb) {
+  if (!fb) return false;
 
   uint32_t expectedLen = (uint32_t)fb->width * fb->height * 2;
   if (fb->len != expectedLen) {
@@ -384,41 +413,55 @@ bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
     return false;
   }
 
-  uint32_t totalPixels = (uint32_t)fb->width * fb->height;
-  // Prefer PSRAM/8-bit capable heap first to avoid internal RAM exhaustion.
-  uint8_t *gray = (uint8_t*)heap_caps_malloc(totalPixels, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!gray) {
-    gray = (uint8_t*)heap_caps_malloc(totalPixels, MALLOC_CAP_8BIT);
-  }
-
-  if (!gray) {
-    Serial.printf("[DER] Could not allocate rightGray (%u bytes)\n", (unsigned)totalPixels);
-    Serial.printf("[DER] Free heap=%u, Free PSRAM=%u\n",
-                  (unsigned)ESP.getFreeHeap(),
-                  (unsigned)ESP.getFreePsram());
-    return false;
-  }
-
-  uint32_t px = 0;
-  for (uint32_t i = 0; i < fb->len; i += 2) {
-    uint16_t p = ((uint16_t)fb->buf[i] << 8) | fb->buf[i + 1];
-    gray[px++] = rgb565ToGray(p);
-  }
-
-  *outGray = gray;
   return true;
 }
 
-bool saveGrayPGM(const char *path, const uint8_t *gray, uint16_t width, uint16_t height) {
+bool saveGrayPGMFromFrame(const char *path, camera_fb_t *fb) {
+  if (!fb) return false;
+
+  uint16_t width = fb->width;
+  uint16_t height = fb->height;
+
+  if (!validateRgb565Frame(fb)) {
+    return false;
+  }
+
   File f = SD.open(path, FILE_WRITE);
   if (!f) return false;
 
   f.printf("P5\n%u %u\n255\n", width, height);
-  size_t total = (size_t)width * height;
-  size_t w = f.write(gray, total);
+
+  uint8_t grayChunk[256];
+  size_t pending = 0;
+  size_t writtenPixels = 0;
+
+  for (uint32_t i = 0; i < fb->len; i += 2) {
+    uint16_t p = ((uint16_t)fb->buf[i] << 8) | fb->buf[i + 1];
+    grayChunk[pending++] = rgb565ToGray(p);
+
+    if (pending == sizeof(grayChunk)) {
+      size_t w = f.write(grayChunk, pending);
+      if (w != pending) {
+        f.close();
+        return false;
+      }
+      writtenPixels += pending;
+      pending = 0;
+    }
+  }
+
+  if (pending > 0) {
+    size_t w = f.write(grayChunk, pending);
+    if (w != pending) {
+      f.close();
+      return false;
+    }
+    writtenPixels += pending;
+  }
+
   f.close();
 
-  return w == total;
+  return writtenPixels == (size_t)width * height;
 }
 
 /*
@@ -499,18 +542,16 @@ void loop() {
   Serial.printf("[DER] width=%u height=%u len=%u format=%u\n",
                 fb->width, fb->height, fb->len, fb->format);
 
-  uint8_t *rightGray = nullptr;
-  if (!buildGrayBufferFromFrame(fb, &rightGray)) {
-    Serial.println("[DER] Error building rightGray");
+  if (!validateRgb565Frame(fb)) {
+    Serial.println("[DER] Invalid frame for grayscale conversion");
     esp_camera_fb_return(fb);
     waitButtonRelease();
     g_busy = false;
     return;
   }
 
-  if (!saveGrayPGM(rightPath.c_str(), rightGray, fb->width, fb->height)) {
+  if (!saveGrayPGMFromFrame(rightPath.c_str(), fb)) {
     Serial.println("[DER] Error saving right image");
-    free(rightGray);
     esp_camera_fb_return(fb);
     waitButtonRelease();
     g_busy = false;
@@ -521,14 +562,13 @@ void loop() {
 
   // Added for step 2: send the same grayscale image buffer over ESP-NOW.
   uint16_t imageId = nextImageIdCounter++;
-  if (sendImageOverEspNow(rightGray, fb->width, fb->height, imageId)) {
+  if (sendImageOverEspNow(fb, imageId)) {
     Serial.printf("[SENDER] ESP-NOW send OK (id=%u)\n", imageId);
   } else {
     Serial.printf("[SENDER] ESP-NOW send FAILED (id=%u)\n", imageId);
   }
 
   esp_camera_fb_return(fb);
-  free(rightGray);
 
   /*
   // Original flow kept for next step (do not execute yet):
