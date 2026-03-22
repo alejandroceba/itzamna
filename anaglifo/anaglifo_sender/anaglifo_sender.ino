@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <esp_heap_caps.h>
 
 // ================= CONFIG =================
 static const int BTN_PIN = D2;
@@ -384,9 +385,17 @@ bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
   }
 
   uint32_t totalPixels = (uint32_t)fb->width * fb->height;
-  uint8_t *gray = (uint8_t*)malloc(totalPixels);
+  // Prefer PSRAM/8-bit capable heap first to avoid internal RAM exhaustion.
+  uint8_t *gray = (uint8_t*)heap_caps_malloc(totalPixels, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!gray) {
-    Serial.println("[DER] Could not allocate rightGray");
+    gray = (uint8_t*)heap_caps_malloc(totalPixels, MALLOC_CAP_8BIT);
+  }
+
+  if (!gray) {
+    Serial.printf("[DER] Could not allocate rightGray (%u bytes)\n", (unsigned)totalPixels);
+    Serial.printf("[DER] Free heap=%u, Free PSRAM=%u\n",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getFreePsram());
     return false;
   }
 
