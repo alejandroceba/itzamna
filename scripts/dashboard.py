@@ -58,7 +58,7 @@ NUM_VARS = len(LABELS)
 NUM_COLS = 2
 NUM_ROWS = math.ceil(NUM_VARS / NUM_COLS)
 MAX_POINTS = 50
-LOG_FILE = "../data/esp32_telemetry_secure.csv"
+LOG_FILE = "../data/enviar_sin_sensores.csv"
 
 # Ensure the data directory exists
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)

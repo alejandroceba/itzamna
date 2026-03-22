@@ -21,7 +21,6 @@
 // ============================================================================
 #define DEBUG 1                        // Set to 1 for detailed CSV logs, 0 for silent operation
 
-// ============================================================================
 // ESP-NOW & WIFI CONFIGURATION
 // ============================================================================
 #define WIFI_CHANNEL 6
@@ -30,6 +29,8 @@ uint8_t receiverMAC[] = {0xD8, 0x3B, 0xDA, 0x45, 0xCD, 0x24};  // Receiver MAC a
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
+// COMMENTED OUT - SENSOR TESTING MODE (Using random values)
+/*
 // DS18B20 (OneWire temperature sensor)
 #define DS18_PIN 4
 
@@ -43,6 +44,7 @@ uint8_t receiverMAC[] = {0xD8, 0x3B, 0xDA, 0x45, 0xCD, 0x24};  // Receiver MAC a
 #define BME_SCK 7
 #define BME_MOSI 9
 #define BME_MISO 8
+*/
 
 // ============================================================================
 // SENSOR TIMING & PARAMETERS
@@ -58,10 +60,13 @@ const unsigned long SEND_INTERVAL_MS = 1000;    // 1 Hz ESP-NOW transmission rat
 // ============================================================================
 // SENSOR OBJECT INSTANTIATION
 // ============================================================================
+// COMMENTED OUT - SENSOR TESTING MODE (Using random values)
+/*
 Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK);  // SPI mode
 OneWire oneWire(DS18_PIN);
 DallasTemperature ds18b20(&oneWire);
 DFRobot_BMI160 bmi;
+*/
 
 // ============================================================================
 // DATA PACKET STRUCTURE
@@ -263,6 +268,10 @@ void loop() {
 // SENSOR INITIALIZATION
 // ============================================================================
 void initializeSensors() {
+  // SENSOR TESTING MODE - Sensors commented out, using random values
+  Serial.println("✓ Running in SENSOR TESTING MODE (random values)");
+  
+  /*
   // --- Initialize I2C Bus for BMI160 ---
   Serial.println("Initializing I2C bus...");
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -299,17 +308,20 @@ void initializeSensors() {
   ds18b20.begin();
   
   Serial.println("✓ DS18B20 initialized\n");
+  */
 }
 
 // ============================================================================
 // ACCELEROMETER BIAS CALIBRATION
 // ============================================================================
 void calibrateAccelerometer() {
+  // SENSOR TESTING MODE - Calibration skipped
   Serial.println("================================");
   Serial.println("ACCELEROMETER CALIBRATION");
-  Serial.println("DO NOT MOVE THE DEVICE");
-  Serial.println("================================");
+  Serial.println("SKIPPED (Sensor Testing Mode)");
+  Serial.println("================================\n");
   
+  /*
   // Reset bias accumulators
   bias_accel_x = 0.0;
   bias_accel_y = 0.0;
@@ -348,12 +360,35 @@ void calibrateAccelerometer() {
     Serial.printf("Bias Y: %.4f m/s²\n", bias_accel_y);
     Serial.printf("Bias Z: %.4f m/s²\n\n", bias_accel_z);
   }
+  */
 }
 
 // ============================================================================
 // READ ALL SENSORS AT 100 Hz
 // ============================================================================
 void readAllSensors() {
+  // SENSOR TESTING MODE - Generating random values to maintain packet structure
+  
+  // --- Generate Random Temperature Values ---
+  sensorData.temperature_bme280 = random(200, 400) / 10.0;  // 20-40°C
+  sensorData.temperature_ds18b20 = random(200, 400) / 10.0;  // 20-40°C
+  
+  // --- Generate Random Pressure and Altitude ---
+  sensorData.pressure_hpa = random(95000, 105000) / 1000.0;  // 950-1050 hPa
+  sensorData.altitude_m = random(0, 10000) / 100.0;  // 0-100m
+  
+  // --- Generate Random Acceleration Values ---
+  current_accel_x = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
+  current_accel_y = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
+  current_accel_z = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
+  
+  // Store acceleration in packet (same as sensor version)
+  sensorData.accel_x = current_accel_x;
+  sensorData.accel_y = current_accel_y;
+  sensorData.accel_z = current_accel_z;
+  
+  /*
+  // --- Original Sensor Code (Commented for Reference) ---
   // --- Read BME280 (pressure, altitude, temperature) ---
   sensorData.temperature_bme280 = bme.readTemperature();
   sensorData.pressure_hpa = (bme.readPressure() / 100.0) - 74.0;  // Pa → hPa, offset correction
@@ -391,6 +426,7 @@ void readAllSensors() {
   sensorData.accel_x = current_accel_x;
   sensorData.accel_y = current_accel_y;
   sensorData.accel_z = current_accel_z;
+  */
 }
 
 // ============================================================================
