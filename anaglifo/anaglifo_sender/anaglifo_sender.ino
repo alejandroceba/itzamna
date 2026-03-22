@@ -83,6 +83,7 @@ struct __attribute__((packed)) EndPacket {
 };
 
 static bool g_busy = false;
+static bool g_sdAvailable = false;
 static volatile bool sendDone = false;
 static volatile esp_now_send_status_t lastSendStatus = ESP_NOW_SEND_FAIL;
 static uint16_t nextImageIdCounter = 1;
@@ -198,10 +199,26 @@ bool initCamera() {
 
 // ================= SD =================
 bool initSD() {
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+
+  // Attempt #1: explicit SPI pins used in the original sketch.
   SPI.begin(7, 8, 9, SD_CS);
-  if (!SD.begin(SD_CS, SPI)) return false;
-  if (SD.cardType() == CARD_NONE) return false;
-  return true;
+  if (SD.begin(SD_CS, SPI) && SD.cardType() != CARD_NONE) {
+    return true;
+  }
+
+  // Attempt #2: board default SPI mapping.
+  SD.end();
+  SPI.end();
+  delay(20);
+  SPI.begin();
+  if (SD.begin(SD_CS) && SD.cardType() != CARD_NONE) {
+    return true;
+  }
+
+  Serial.printf("[SD] init failed. cardType=%u\n", (unsigned)SD.cardType());
+  return false;
 }
 
 // ================= BUTTON =================
@@ -495,9 +512,11 @@ void setup() {
     while (true) delay(1000);
   }
 
-  if (!initSD()) {
-    Serial.println("Error initializing SD");
-    while (true) delay(1000);
+  g_sdAvailable = initSD();
+  if (!g_sdAvailable) {
+    Serial.println("[SD] Not available. Continuing in send-only mode.");
+  } else {
+    Serial.println("[SD] Ready");
   }
 
   if (!initEspNow()) {
@@ -516,11 +535,14 @@ void loop() {
   g_busy = true;
 
   uint32_t tStart = millis();
-  uint16_t idx = nextIndex();
-
-  char rightName[40];
-  snprintf(rightName, sizeof(rightName), "/Right_%04u.pgm", idx);
-  String rightPath = String(rightName);
+  uint16_t idx = 0;
+  String rightPath = String("/Right_NA.pgm");
+  if (g_sdAvailable) {
+    idx = nextIndex();
+    char rightName[40];
+    snprintf(rightName, sizeof(rightName), "/Right_%04u.pgm", idx);
+    rightPath = String(rightName);
+  }
 
   /*
   char leftName[40];
@@ -550,15 +572,19 @@ void loop() {
     return;
   }
 
-  if (!saveGrayPGMFromFrame(rightPath.c_str(), fb)) {
-    Serial.println("[DER] Error saving right image");
-    esp_camera_fb_return(fb);
-    waitButtonRelease();
-    g_busy = false;
-    return;
-  }
+  if (g_sdAvailable) {
+    if (!saveGrayPGMFromFrame(rightPath.c_str(), fb)) {
+      Serial.println("[DER] Error saving right image");
+      esp_camera_fb_return(fb);
+      waitButtonRelease();
+      g_busy = false;
+      return;
+    }
 
-  Serial.printf("[DER] Right image saved to %s\n", rightPath.c_str());
+    Serial.printf("[DER] Right image saved to %s\n", rightPath.c_str());
+  } else {
+    Serial.println("[DER] SD not available: skipping save");
+  }
 
   // Added for step 2: send the same grayscale image buffer over ESP-NOW.
   uint16_t imageId = nextImageIdCounter++;
