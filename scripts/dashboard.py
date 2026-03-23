@@ -759,6 +759,7 @@ def process_non_sensor_line(line: str) -> None:
 
     if line.startswith("RECEIVER_") or line.startswith("SENSOR_MAC") or line.startswith("IMAGE_MAC"):
         print(line)
+        dbg(f"RXSTAT {line}")
 
 
 def split_protocol_fragments(line: str) -> list[str]:

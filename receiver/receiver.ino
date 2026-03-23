@@ -160,6 +160,9 @@ volatile uint16_t g_imgAckId = 0;
 volatile uint8_t g_imgAckOk = 0;
 volatile uint16_t g_imgAckChunks = 0;
 volatile uint32_t g_imgAckBytes = 0;
+volatile uint8_t g_imgAckReason = 0;
+volatile uint32_t g_imgAckTxOk = 0;
+volatile uint32_t g_imgAckTxFail = 0;
 
 // ============================================================================
 // CRITICAL SECTION
@@ -208,12 +211,13 @@ void signalImageEnd(uint16_t imageId, uint8_t ok, uint16_t chunks, uint32_t byte
   g_imgEndPending = true;
 }
 
-void signalImageAck(uint16_t imageId, uint8_t ok, uint16_t chunks, uint32_t bytesCount) {
+void signalImageAck(uint16_t imageId, uint8_t ok, uint16_t chunks, uint32_t bytesCount, uint8_t reason) {
   if (imageId == 0) return;
   g_imgAckId = imageId;
   g_imgAckOk = ok;
   g_imgAckChunks = chunks;
   g_imgAckBytes = bytesCount;
+  g_imgAckReason = reason;
   g_imgAckPending = true;
 }
 
@@ -236,7 +240,7 @@ void freeImageBufferIfAny() {
 }
 
 void abortImageRx(uint8_t okFlag) {
-  signalImageAck(g_imgImageId, okFlag, g_imgExpectedChunk, g_imgReceivedBytes);
+  signalImageAck(g_imgImageId, okFlag, g_imgExpectedChunk, g_imgReceivedBytes, 1);
   signalImageEnd(g_imgImageId, okFlag, g_imgExpectedChunk, g_imgReceivedBytes);
   freeImageBufferIfAny();
   resetImageRxStateNoFree();
@@ -429,6 +433,7 @@ void handleImagePacket(const uint8_t *data, int len) {
     // Do not interrupt emission of a completed image.
     if (g_imgEmitActive || g_imgReadyToEmit) {
       g_imgBadPackets++;
+      Serial.printf("RECEIVER_IMG_DROP reason=begin_while_emitting id=%u\n", (unsigned)b.imageId);
       IMG_DBG("IMG_DBG begin_while_emitting id=%u\n", (unsigned)b.imageId);
       return;
     }
@@ -490,6 +495,11 @@ void handleImagePacket(const uint8_t *data, int len) {
 
     if (imageId != g_imgImageId || chunkIndex != g_imgExpectedChunk) {
       g_imgBadPackets++;
+      Serial.printf("RECEIVER_IMG_DROP reason=chunk_order id=%u expected_id=%u got_chunk=%u expected_chunk=%u\n",
+                    (unsigned)imageId,
+                    (unsigned)g_imgImageId,
+                    (unsigned)chunkIndex,
+                    (unsigned)g_imgExpectedChunk);
       IMG_DBG("IMG_DBG chunk_order_mismatch id=%u/%u chunk=%u expected=%u\n",
               (unsigned)imageId,
               (unsigned)g_imgImageId,
@@ -501,6 +511,10 @@ void handleImagePacket(const uint8_t *data, int len) {
 
     if (n == 0 || n > g_imgChunkPayload || n > IMG_MAX_CHUNK_PAYLOAD || (7 + (int)n) != len) {
       g_imgBadPackets++;
+      Serial.printf("RECEIVER_IMG_DROP reason=chunk_size id=%u n=%u len=%d\n",
+                    (unsigned)g_imgImageId,
+                    (unsigned)n,
+                    len);
       IMG_DBG("IMG_DBG chunk_size_mismatch n=%u chunkPayload=%u len=%d expected_len=%u\n",
               (unsigned)n,
               (unsigned)g_imgChunkPayload,
@@ -512,6 +526,11 @@ void handleImagePacket(const uint8_t *data, int len) {
 
     if (g_imgReceivedBytes + n > g_imgDataLen) {
       g_imgBadPackets++;
+      Serial.printf("RECEIVER_IMG_DROP reason=chunk_overflow id=%u recv=%lu n=%u total=%lu\n",
+                    (unsigned)g_imgImageId,
+                    (unsigned long)g_imgReceivedBytes,
+                    (unsigned)n,
+                    (unsigned long)g_imgDataLen);
       IMG_DBG("IMG_DBG chunk_overflow recv=%lu n=%u total=%lu\n",
               (unsigned long)g_imgReceivedBytes,
               (unsigned)n,
@@ -552,6 +571,13 @@ void handleImagePacket(const uint8_t *data, int len) {
 
     if (!ok) {
       g_imgBadPackets++;
+      Serial.printf("RECEIVER_IMG_DROP reason=end_validation id=%u expected_id=%u recv=%lu total=%lu chunks=%u expected_chunks=%u\n",
+                    (unsigned)e.imageId,
+                    (unsigned)g_imgImageId,
+                    (unsigned long)g_imgReceivedBytes,
+                    (unsigned long)g_imgDataLen,
+                    (unsigned)e.totalChunks,
+                    (unsigned)g_imgExpectedChunk);
           IMG_DBG("IMG_DBG end_validation_fail id=%u/%u dataLen=%lu/%lu recv=%lu chunks=%u/%u\n",
             (unsigned)e.imageId,
             (unsigned)g_imgImageId,
@@ -831,11 +857,26 @@ void loop() {
     uint8_t ok = g_imgAckOk;
     uint16_t chunks = g_imgAckChunks;
     uint32_t bytesCount = g_imgAckBytes;
+    uint8_t reason = g_imgAckReason;
     g_imgAckPending = false;
     portEXIT_CRITICAL(&g_mux);
 
     if (pending) {
-      sendAckPacket(id, ok, chunks, bytesCount);
+      bool sent = sendAckPacket(id, ok, chunks, bytesCount);
+      if (sent) {
+        g_imgAckTxOk++;
+      } else {
+        g_imgAckTxFail++;
+      }
+      Serial.printf("RECEIVER_ACK_TX id=%u ok=%u reason=%u chunks=%u bytes=%lu sent=%u ack_ok=%lu ack_fail=%lu\n",
+                    (unsigned)id,
+                    (unsigned)ok,
+                    (unsigned)reason,
+                    (unsigned)chunks,
+                    (unsigned long)bytesCount,
+                    sent ? 1u : 0u,
+                    (unsigned long)g_imgAckTxOk,
+                    (unsigned long)g_imgAckTxFail);
     }
   }
 
@@ -915,7 +956,7 @@ void loop() {
 
     if (done) {
       signalImageEnd(id, 1, endChunks, endBytes);
-      signalImageAck(id, 1, endChunks, endBytes);
+      signalImageAck(id, 1, endChunks, endBytes, 0);
       IMG_DBG("IMG_DBG emit_end id=%u chunks=%u bytes=%lu\n",
               (unsigned)id,
               (unsigned)endChunks,

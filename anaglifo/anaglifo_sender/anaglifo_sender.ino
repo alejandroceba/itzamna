@@ -1,4 +1,4 @@
-1.#include <Arduino.h>
+#include <Arduino.h>
 #include "esp_camera.h"
 #include "FS.h"
 #include "SD.h"
