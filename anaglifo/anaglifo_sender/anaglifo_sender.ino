@@ -1,4 +1,4 @@
-#include <Arduino.h>
+1.#include <Arduino.h>
 #include "esp_camera.h"
 #include "FS.h"
 #include "SD.h"
@@ -37,7 +37,11 @@ static const uint16_t PACKET_MAGIC = 0xA66A;
 static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
+static const uint8_t PKT_ACK = 4;
 static const uint16_t CHUNK_PAYLOAD = 200;
+static const uint8_t IMAGE_SEND_ATTEMPTS = 3;
+static const uint32_t IMAGE_ACK_TIMEOUT_MS = 5000;
+static const uint16_t IMAGE_RETRY_DELAY_MS = 300;
 
 // ================= EXPOSURE / GAIN =================
 static const int AEC_VALUE = 450;
@@ -82,10 +86,23 @@ struct __attribute__((packed)) EndPacket {
   uint32_t dataLen;
 };
 
+struct __attribute__((packed)) AckPacket {
+  uint8_t type;
+  uint16_t imageId;
+  uint8_t ok;
+  uint16_t chunks;
+  uint32_t bytesCount;
+};
+
 static bool g_busy = false;
 static bool g_sdAvailable = false;
 static volatile bool sendDone = false;
 static volatile esp_now_send_status_t lastSendStatus = ESP_NOW_SEND_FAIL;
+static volatile bool ackReceived = false;
+static volatile uint16_t ackImageId = 0;
+static volatile uint8_t ackOk = 0;
+static volatile uint16_t ackChunks = 0;
+static volatile uint32_t ackBytes = 0;
 static uint16_t nextImageIdCounter = 1;
 
 /*
@@ -267,6 +284,32 @@ void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
   sendDone = true;
 }
 
+void onDataRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  (void)info;
+  if (!data || len != (int)sizeof(AckPacket)) return;
+
+  AckPacket ack;
+  memcpy(&ack, data, sizeof(ack));
+  if (ack.type != PKT_ACK) return;
+
+  ackImageId = ack.imageId;
+  ackOk = ack.ok;
+  ackChunks = ack.chunks;
+  ackBytes = ack.bytesCount;
+  ackReceived = true;
+}
+
+bool waitForAck(uint16_t imageId, uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    if (ackReceived && ackImageId == imageId) {
+      return ackOk == 1;
+    }
+    delay(1);
+  }
+  return false;
+}
+
 bool sendPacketWithRetry(const uint8_t *data, size_t len, uint8_t retries = 4) {
   for (uint8_t attempt = 0; attempt < retries; attempt++) {
     sendDone = false;
@@ -318,6 +361,7 @@ bool initEspNow() {
   }
 
   esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataRecv);
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, receiverMAC, 6);
@@ -334,6 +378,12 @@ bool initEspNow() {
 
 bool sendImageOverEspNow(camera_fb_t *fb, uint16_t imageId) {
   if (!fb) return false;
+
+  ackReceived = false;
+  ackImageId = 0;
+  ackOk = 0;
+  ackChunks = 0;
+  ackBytes = 0;
 
   uint32_t expectedLen = (uint32_t)fb->width * fb->height * 2;
   if (fb->len != expectedLen) {
@@ -415,6 +465,16 @@ bool sendImageOverEspNow(camera_fb_t *fb, uint16_t imageId) {
     Serial.println("[SENDER] Failed to send END packet");
     return false;
   }
+
+  if (!waitForAck(imageId, IMAGE_ACK_TIMEOUT_MS)) {
+    Serial.printf("[SENDER] ACK timeout/fail (id=%u)\n", imageId);
+    return false;
+  }
+
+  Serial.printf("[SENDER] ACK OK (id=%u chunks=%u bytes=%lu)\n",
+                imageId,
+                ackChunks,
+                (unsigned long)ackBytes);
 
   return true;
 }
@@ -588,9 +648,27 @@ void loop() {
 
   // Added for step 2: send the same grayscale image buffer over ESP-NOW.
   uint16_t imageId = nextImageIdCounter++;
-  if (sendImageOverEspNow(fb, imageId)) {
-    Serial.printf("[SENDER] ESP-NOW send OK (id=%u)\n", imageId);
-  } else {
+  bool sent = false;
+  for (uint8_t attempt = 1; attempt <= IMAGE_SEND_ATTEMPTS; attempt++) {
+    if (sendImageOverEspNow(fb, imageId)) {
+      Serial.printf("[SENDER] ESP-NOW send OK (id=%u attempt=%u/%u)\n",
+                    imageId,
+                    attempt,
+                    IMAGE_SEND_ATTEMPTS);
+      sent = true;
+      break;
+    }
+
+    Serial.printf("[SENDER] Attempt failed (id=%u attempt=%u/%u)\n",
+                  imageId,
+                  attempt,
+                  IMAGE_SEND_ATTEMPTS);
+    if (attempt < IMAGE_SEND_ATTEMPTS) {
+      delay(IMAGE_RETRY_DELAY_MS);
+    }
+  }
+
+  if (!sent) {
     Serial.printf("[SENDER] ESP-NOW send FAILED (id=%u)\n", imageId);
   }
 
