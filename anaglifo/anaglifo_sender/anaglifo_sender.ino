@@ -12,7 +12,7 @@
 static const int BTN_PIN = D2;
 static const int SD_CS = 21;
 
-/*
+
 // UART (kept for future ESP-NOW/UART workflow)
 static const int TX_PIN = D6;
 static const int RX_PIN = D7;
@@ -27,7 +27,7 @@ static const uint8_t ACK_CHUNK_BYTE = 0x43; // 'C'
 static const uint8_t ACK_FINAL_BYTE = 0x06; // ACK
 static const uint8_t ERR_BYTE       = 0x15; // NAK
 static const uint16_t CHUNK_SIZE = 512;
-*/
+
 
 // ================= ESP-NOW =================
 static const uint8_t WIFI_CHANNEL = 6;
@@ -47,9 +47,9 @@ static const uint16_t IMAGE_RETRY_DELAY_MS = 300;
 static const int AEC_VALUE = 450;
 static const int AGC_GAIN = 10;
 
-/*
+
 HardwareSerial Link(1);
-*/
+
 
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -105,7 +105,7 @@ static volatile uint16_t ackChunks = 0;
 static volatile uint32_t ackBytes = 0;
 static uint16_t nextImageIdCounter = 1;
 
-/*
+
 // ================= HELPERS BINARIOS =================
 static uint16_t read_u16_le(const uint8_t *p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
@@ -117,7 +117,7 @@ static uint32_t read_u32_le(const uint8_t *p) {
        | ((uint32_t)p[2] << 16)
        | ((uint32_t)p[3] << 24);
 }
-*/
+
 
 // ================= CONVERSION TO GRAYSCALE =================
 uint8_t rgb565ToGray(uint16_t p) {
@@ -257,7 +257,7 @@ void waitButtonRelease() {
   delay(20);
 }
 
-/*
+
 // ================= UART =================
 bool readExact(uint8_t *dst, size_t n, uint32_t timeoutMs) {
   uint32_t t0 = millis();
@@ -275,7 +275,7 @@ bool readExact(uint8_t *dst, size_t n, uint32_t timeoutMs) {
   }
   return got == n;
 }
-*/
+
 
 // ================= ESP-NOW SEND =================
 void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
@@ -541,7 +541,7 @@ bool saveGrayPGMFromFrame(const char *path, camera_fb_t *fb) {
   return writtenPixels == (size_t)width * height;
 }
 
-/*
+
 // ================= RECEIVE LEFT + BUILD ANAGLYPH =================
 bool receiveLeftAndBuildOutputs(const char *leftPath,
                                 const char *anaglyphPath,
@@ -553,7 +553,7 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
   // Intentionally commented for single-camera save+send test.
   return false;
 }
-*/
+
 
 // ================= SETUP =================
 void setup() {
@@ -562,10 +562,10 @@ void setup() {
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
-  /*
+  
   Link.setRxBufferSize(4096);
   Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
-  */
+  
 
   if (!initCamera()) {
     Serial.println("Error initializing camera");
@@ -604,12 +604,12 @@ void loop() {
     rightPath = String(rightName);
   }
 
-  /*
+  
   char leftName[40];
   char anaName[40];
   snprintf(leftName, sizeof(leftName), "/Left_%04u.pgm", idx);
   snprintf(anaName, sizeof(anaName), "/Anaglyph_%04u.ppm", idx);
-  */
+  
 
   Serial.println("\n[DER] Trigger detected");
 
@@ -674,14 +674,14 @@ void loop() {
 
   esp_camera_fb_return(fb);
 
-  /*
+  
   // Original flow kept for next step (do not execute yet):
   // 1) Link.write(READY_BYTE)
   // 2) Receive header from other XIAO
   // 3) Receive left image chunks over UART
   // 4) Build anaglyph and save left/anaglyph files
   // 5) Send ACK_FINAL_BYTE
-  */
+  
 
   uint32_t elapsed = millis() - tStart;
   Serial.printf("[DER] Capture+save+send time: %lu ms (%.2f s)\n",
