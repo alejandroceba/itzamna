@@ -37,7 +37,6 @@ uint8_t receiverMAC[] = {0xD8, 0x3B, 0xDA, 0x45, 0xCD, 0x24};  // Receiver MAC a
 // BMI160 (I2C accelerometer/gyroscope)
 #define SDA_PIN 5
 #define SCL_PIN 6
-// const int8_t BMI160_I2C_ADDR = 0x68;
 
 // BME280 (SPI barometric/temperature sensor)
 #define BME_CS 2
@@ -50,8 +49,9 @@ uint8_t receiverMAC[] = {0xD8, 0x3B, 0xDA, 0x45, 0xCD, 0x24};  // Receiver MAC a
 // SENSOR TIMING & PARAMETERS
 // ============================================================================
 #define ACCEL_SENSITIVITY_THRESHOLD 0.3  // m/s² - threshold for velocity reset
-#define ACCEL_SCALE 16384.0              // ±2g sensitivity scale factor
-#define MUESTRAS_BIAS 200                // Number of samples for bias calibration
+#define ACC_SCALE 16384.0                // ±2g sensitivity scale factor
+#define GYRO_SCALE 131.2                 // for ±250°/s
+#define MUESTRAS_BIAS 500                // Number of samples for bias calibration
 
 // Sampling rates
 const unsigned long SAMPLE_INTERVAL_MS = 10;    // 100 Hz sensor reading rate
@@ -108,10 +108,13 @@ unsigned long lastTransmitTime = 0;
 // ============================================================================
 int16_t rawSensorData[6];           // [0-2] gyro, [3-5] accel from BMI160
 
-// Accelerometer calibration (bias removal)
+// Raw bias calibration values from BMI160
 float bias_accel_x = 0.0;
 float bias_accel_y = 0.0;
 float bias_accel_z = 0.0;
+float bias_gyro_x = 0.0;
+float bias_gyro_y = 0.0;
+float bias_gyro_z = 0.0;
 
 // Current acceleration values (after bias removal)
 float current_accel_x = 0.0;
@@ -141,6 +144,7 @@ bool ledState = false;
 // ============================================================================
 void initializeSensors();
 void calibrateAccelerometer();
+void autoCalibrateAccelerometer();
 void readAllSensors();
 void integrateVelocity();
 void transmitSensorData();
@@ -261,6 +265,11 @@ void loop() {
     if (DEBUG) {
       printDebugData();
     }
+
+    // Match Sensado behavior: reset each report cycle to limit drift accumulation.
+    velocity_integral_x = 0.0;
+    velocity_integral_y = 0.0;
+    velocity_integral_z = 0.0;
   }
 }
 
@@ -268,10 +277,6 @@ void loop() {
 // SENSOR INITIALIZATION
 // ============================================================================
 void initializeSensors() {
-  // SENSOR TESTING MODE - Sensors commented out, using random values
-  Serial.println("✓ Running in SENSOR TESTING MODE (random values)");
-  
-  
   // --- Initialize I2C Bus for BMI160 ---
   Serial.println("Initializing I2C bus...");
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -315,37 +320,35 @@ void initializeSensors() {
 // ACCELEROMETER BIAS CALIBRATION
 // ============================================================================
 void calibrateAccelerometer() {
-  // SENSOR TESTING MODE - Calibration skipped
   Serial.println("================================");
   Serial.println("ACCELEROMETER CALIBRATION");
-  Serial.println("SKIPPED (Sensor Testing Mode)");
+  Serial.println("Calibrating... DO NOT MOVE SENSOR");
   Serial.println("================================\n");
-  
-  
+
+  autoCalibrateAccelerometer();
+
   // Reset bias accumulators
   bias_accel_x = 0.0;
   bias_accel_y = 0.0;
   bias_accel_z = 0.0;
+  bias_gyro_x = 0.0;
+  bias_gyro_y = 0.0;
+  bias_gyro_z = 0.0;
   
   // Collect MUESTRAS_BIAS samples
   for (int i = 0; i < MUESTRAS_BIAS; i++) {
     // Read raw sensor data
     bmi.getAccelGyroData(rawSensorData);
-    
-    // Convert raw values to g (gravity units)
-    float ax_g = rawSensorData[3] / ACCEL_SCALE;
-    float ay_g = rawSensorData[4] / ACCEL_SCALE;
-    float az_g = rawSensorData[5] / ACCEL_SCALE;
-    
-    // Convert to m/s²
-    float ax_ms2 = ax_g * 9.81;
-    float ay_ms2 = ay_g * 9.81;
-    float az_ms2 = az_g * 9.81;
-    
+
+    // Accumulate gyro and accel bias in raw units
+    bias_gyro_x += rawSensorData[0];
+    bias_gyro_y += rawSensorData[1];
+    bias_gyro_z += rawSensorData[2];
+
     // Accumulate bias
-    bias_accel_x += ax_ms2;
-    bias_accel_y += ay_ms2;
-    bias_accel_z += az_ms2;
+    bias_accel_x += rawSensorData[3];
+    bias_accel_y += rawSensorData[4];
+    bias_accel_z += rawSensorData[5];
     
     delay(5);  // Small delay between samples
   }
@@ -354,44 +357,44 @@ void calibrateAccelerometer() {
   bias_accel_x /= MUESTRAS_BIAS;
   bias_accel_y /= MUESTRAS_BIAS;
   bias_accel_z /= MUESTRAS_BIAS;
+  bias_gyro_x /= MUESTRAS_BIAS;
+  bias_gyro_y /= MUESTRAS_BIAS;
+  bias_gyro_z /= MUESTRAS_BIAS;
   
   if (DEBUG) {
-    Serial.printf("Bias X: %.4f m/s²\n", bias_accel_x);
-    Serial.printf("Bias Y: %.4f m/s²\n", bias_accel_y);
-    Serial.printf("Bias Z: %.4f m/s²\n\n", bias_accel_z);
+    Serial.printf("Accel bias X: %.4f\n", bias_accel_x);
+    Serial.printf("Accel bias Y: %.4f\n", bias_accel_y);
+    Serial.printf("Accel bias Z: %.4f\n", bias_accel_z);
+    Serial.printf("Gyro bias X: %.4f\n", bias_gyro_x);
+    Serial.printf("Gyro bias Y: %.4f\n", bias_gyro_y);
+    Serial.printf("Gyro bias Z: %.4f\n\n", bias_gyro_z);
   }
   
+}
+
+// ============================================================================
+// BMI160 AUTO-CALIBRATION COMMAND
+// ============================================================================
+void autoCalibrateAccelerometer() {
+  Wire.beginTransmission(BMI160_I2C_ADDR);
+  Wire.write(0x7E);  // Command register
+  Wire.write(0x37);  // Start accelerometer offset calibration
+  Wire.endTransmission();
+  delay(100);
+  delay(1000);
+
+  if (DEBUG) {
+    Serial.println("Accelerometer auto-calibration complete");
+  }
 }
 
 // ============================================================================
 // READ ALL SENSORS AT 100 Hz
 // ============================================================================
 void readAllSensors() {
-  // SENSOR TESTING MODE - Generating random values to maintain packet structure
-  
-  // --- Generate Random Temperature Values ---
-  sensorData.temperature_bme280 = random(200, 400) / 10.0;  // 20-40°C
-  sensorData.temperature_ds18b20 = random(200, 400) / 10.0;  // 20-40°C
-  
-  // --- Generate Random Pressure and Altitude ---
-  sensorData.pressure_hpa = random(95000, 105000) / 1000.0;  // 950-1050 hPa
-  sensorData.altitude_m = random(0, 10000) / 100.0;  // 0-100m
-  
-  // --- Generate Random Acceleration Values ---
-  current_accel_x = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
-  current_accel_y = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
-  current_accel_z = (random(-200, 200) / 100.0);  // -2 to +2 m/s²
-  
-  // Store acceleration in packet (same as sensor version)
-  sensorData.accel_x = current_accel_x;
-  sensorData.accel_y = current_accel_y;
-  sensorData.accel_z = current_accel_z;
-  
-  
-  // --- Original Sensor Code (Commented for Reference) ---
   // --- Read BME280 (pressure, altitude, temperature) ---
   sensorData.temperature_bme280 = bme.readTemperature();
-  sensorData.pressure_hpa = (bme.readPressure() / 100.0) - 74.0;  // Pa → hPa, offset correction
+  sensorData.pressure_hpa = (bme.readPressure() / 100.0) - 19.0;  // Pa → hPa, offset correction
   sensorData.altitude_m = bme.readAltitude(1013.25);
   
   // --- Read DS18B20 (external temperature) ---
@@ -401,26 +404,11 @@ void readAllSensors() {
   
   // --- Read BMI160 (accelerometer) ---
   bmi.getAccelGyroData(rawSensorData);
-  
-  // Convert raw accelerometer values to m/s²
-  // [3], [4], [5] are accelerometer X, Y, Z
-  float ax_g = rawSensorData[3] / ACCEL_SCALE;  // Convert to g
-  float ay_g = rawSensorData[4] / ACCEL_SCALE;
-  float az_g = rawSensorData[5] / ACCEL_SCALE;
-  
-  // Convert g to m/s²
-  float ax_raw_ms2 = ax_g * 9.81;
-  float ay_raw_ms2 = ay_g * 9.81;
-  float az_raw_ms2 = az_g * 9.81;
-  
-  // Apply bias correction (remove calibration offset)
-  current_accel_x = ax_raw_ms2 - bias_accel_x;
-  current_accel_y = ay_raw_ms2 - bias_accel_y;
-  current_accel_z = az_raw_ms2 - bias_accel_z;
-  
-  // Apply gravity compensation (Z-axis points upward, gravity = -9.81 m/s²)
-  // Remove gravitational component so Z-axis true acceleration remains
-  current_accel_z -= 9.81;
+
+  // Convert raw accelerometer values to m/s² using calibrated raw offsets
+  current_accel_x = (rawSensorData[3] - bias_accel_x) * (9.81 / ACC_SCALE);
+  current_accel_y = (rawSensorData[4] - bias_accel_y) * (9.81 / ACC_SCALE);
+  current_accel_z = (rawSensorData[5]) * (9.81 / ACC_SCALE);
   
   // Store corrected acceleration in packet
   sensorData.accel_x = current_accel_x;
@@ -433,31 +421,13 @@ void readAllSensors() {
 // INTEGRATE ACCELERATION TO VELOCITY
 // ============================================================================
 void integrateVelocity() {
-  // Calculate time delta since last integration
-  unsigned long now = millis();
-  float dt = (now - lastIntegrationTime) / 1000.0;  // Convert ms to seconds
-  lastIntegrationTime = now;
-  
-  // Guard against invalid dt
-  if (dt <= 0 || dt > 1.0) {
-    return;  // Skip if dt is invalid (shouldn't happen with 10ms interval)
-  }
-  
+  // Sensado_Cansat_2 integration style: fixed dt from sample interval
+  const float dt = SAMPLE_INTERVAL_MS / 1000.0;
+
   // Integrate: velocity += acceleration * dt
   velocity_integral_x += current_accel_x * dt;
   velocity_integral_y += current_accel_y * dt;
   velocity_integral_z += current_accel_z * dt;
-  
-  // --- Reset velocity to zero if motion below sensitivity threshold ---
-  // This prevents drift when the sensor is stationary
-  if (abs(current_accel_x) < ACCEL_SENSITIVITY_THRESHOLD &&
-      abs(current_accel_y) < ACCEL_SENSITIVITY_THRESHOLD &&
-      abs(current_accel_z) < ACCEL_SENSITIVITY_THRESHOLD) {
-    
-    velocity_integral_x = 0.0;
-    velocity_integral_y = 0.0;
-    velocity_integral_z = 0.0;
-  }
   
   // Store integrated velocity in packet
   sensorData.velocity_x = velocity_integral_x;
