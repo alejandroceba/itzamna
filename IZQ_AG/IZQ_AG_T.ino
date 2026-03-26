@@ -3,10 +3,10 @@
 
 // ================= CONFIG =================
 static const int BTN_PIN = D2;
-static const int TX_PIN  = D6;
-static const int RX_PIN  = D7;
+static const int TX_PIN  = D7;  // CROSS-WIRED: swapped vs right
+static const int RX_PIN  = D6;  // CROSS-WIRED: swapped vs right
 //static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 2000000;
+static const uint32_t BAUD = 460800;
 
 // Protocolo
 static const uint16_t MAGIC = 0xA55A;
@@ -42,6 +42,29 @@ HardwareSerial Link(1);
 #define PCLK_GPIO_NUM     13
 
 static bool g_busy = false;
+
+bool waitForAnyByte(uint8_t *outByte, uint32_t timeoutMs) {
+  if (!outByte) return false;
+  uint32_t t0 = millis();
+  uint32_t checkCount = 0;
+  
+  while (millis() - t0 < timeoutMs) {
+    int avail = Link.available();
+    checkCount++;
+    
+    if (avail > 0) {
+      *outByte = (uint8_t)Link.read();
+      Serial.printf("[IZQ] waitForAnyByte: got 0x%02X after %lu checks\n", *outByte, checkCount);
+      return true;
+    }
+    delay(1);
+  }
+  
+  if (checkCount > 0) {
+    Serial.printf("[IZQ] waitForAnyByte timeout after %lu checks\n", checkCount);
+  }
+  return false;
+}
 
 static void write_u16_le(uint8_t *p, uint16_t v) {
   p[0] = v & 0xFF;
@@ -153,16 +176,31 @@ void waitButtonRelease() {
 
 bool waitByte(uint8_t expected, uint32_t timeoutMs) {
   uint32_t t0 = millis();
+  uint32_t checkCount = 0;
+  uint32_t bytesReceived = 0;
+  Serial.printf("[IZQ] waitByte(0x%02X) starting, timeout=%lu ms\n", expected, timeoutMs);
+  
   while (millis() - t0 < timeoutMs) {
-    if (Link.available()) {
+    int avail = Link.available();
+    checkCount++;
+    
+    if (avail > 0) {
+      bytesReceived++;
+      Serial.printf("[IZQ] Check #%lu: Link.available()=%d\n", checkCount, avail);
       uint8_t b = Link.read();
-      if (b == expected) return true;
+      if (b == expected) {
+        Serial.printf("[IZQ] Got expected byte 0x%02X\n", b);
+        return true;
+      }
+      Serial.printf("[IZQ] Got 0x%02X (expected 0x%02X)\n", b, expected);
     } else {
       delay(1);
     }
   }
+  
+  Serial.printf("[IZQ] waitByte timeout: checked %lu times, received %lu bytes\n", checkCount, bytesReceived);
   return false;
-}
+
 
 
 bool sendHeader(camera_fb_t *fb) {
@@ -207,6 +245,61 @@ bool sendFrameChunked(camera_fb_t *fb) {
   return true;
 }
 
+void captureAndSend(bool waitReadyFirst) {
+  if (g_busy) return;
+  g_busy = true;
+
+  if (waitReadyFirst) {
+    Serial.println("\n[IZQ] READY detected, capturing...");
+  } else {
+    Serial.println("\n[IZQ] Trigger detected");
+  }
+
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("[IZQ] Error capturing image");
+    if (!waitReadyFirst) waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  Serial.printf("[IZQ] Capture ready, %u bytes\n", (unsigned)fb->len);
+
+  if (!waitReadyFirst) {
+    Serial.println("[IZQ] Waiting READY...");
+    if (!waitByte(READY_BYTE, 15000)) {
+      Serial.println("[IZQ] READY not received");
+      esp_camera_fb_return(fb);
+      waitButtonRelease();
+      g_busy = false;
+      return;
+    }
+  }
+
+  Serial.println("[IZQ] Sending image chunks...");
+
+  if (!sendFrameChunked(fb)) {
+    Serial.println("[IZQ] Error sending image");
+    esp_camera_fb_return(fb);
+    if (!waitReadyFirst) waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  esp_camera_fb_return(fb);
+
+  if (waitByte(ACK_FINAL_BYTE, 12000)) {
+    Serial.println("[IZQ] Image sent and confirmed");
+  } else if (waitByte(ERR_BYTE, 300)) {
+    Serial.println("[IZQ] Right camera reported error");
+  } else {
+    Serial.println("[IZQ] Final ACK not received");
+  }
+
+  if (!waitReadyFirst) waitButtonRelease();
+  g_busy = false;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(800);
@@ -215,6 +308,7 @@ void setup() {
 
   Link.setRxBufferSize(2048);
   Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
+  Serial.printf("[IZQ] UART Link initialized: TX=D%d RX=D%d BAUD=%lu\n", TX_PIN, RX_PIN, BAUD);
 
   if (!initCamera()) {
     Serial.println("Error al iniciar cámara izquierda");
@@ -226,52 +320,18 @@ void setup() {
 
 void loop() {
   if (g_busy) return;
-  if (!buttonPressed()) return;
 
-  g_busy = true;
-  while (Link.available()) Link.read();
-
-  Serial.println("\n[IZQ] Trigger detectado");
-
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[IZQ] Error capturando imagen");
-    waitButtonRelease();
-    g_busy = false;
+  if (buttonPressed()) {
+    captureAndSend(false);
     return;
   }
 
-  Serial.printf("[IZQ] Captura lista, %u bytes\n", (unsigned)fb->len);
-  Serial.println("[IZQ] Esperando READY...");
-
-  if (!waitByte(READY_BYTE, 8000)) {
-    Serial.println("[IZQ] No llegó READY");
-    esp_camera_fb_return(fb);
-    waitButtonRelease();
-    g_busy = false;
-    return;
+  uint8_t b = 0;
+  if (waitForAnyByte(&b, 5)) {
+    if (b == READY_BYTE) {
+      captureAndSend(true);
+    } else {
+      Serial.printf("[IZQ] UART byte=0x%02X\n", b);
+    }
   }
-
-  Serial.println("[IZQ] READY recibido, enviando imagen por bloques...");
-
-  if (!sendFrameChunked(fb)) {
-    Serial.println("[IZQ] Error enviando imagen");
-    esp_camera_fb_return(fb);
-    waitButtonRelease();
-    g_busy = false;
-    return;
-  }
-
-  esp_camera_fb_return(fb);
-
-  if (waitByte(ACK_FINAL_BYTE, 8000)) {
-    Serial.println("[IZQ] Imagen enviada y guardada correctamente");
-  } else if (waitByte(ERR_BYTE, 300)) {
-    Serial.println("[IZQ] La derecha reportó error");
-  } else {
-    Serial.println("[IZQ] No llegó ACK final");
-  }
-
-  waitButtonRelease();
-  g_busy = false;
 }
