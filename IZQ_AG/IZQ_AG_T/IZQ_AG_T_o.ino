@@ -9,7 +9,7 @@ static const int TX_PIN_PROFILE_B = D6;  // Right RX pin when boards are cross-w
 static const int RX_PIN_PROFILE_B = D7;  // Right TX pin when boards are cross-wired TX->RX
 static const bool START_WITH_PROFILE_A = true;
 //static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 115200;
+static const uint32_t BAUD = 460800;
 static const uint32_t UART_PROFILE_SWITCH_MS = 1200;
 
 // Protocolo

@@ -15,7 +15,7 @@ static const int SD_CS = 21;
 // UART
 static const int TX_PIN = D6;
 static const int RX_PIN = D7;
-static const uint32_t BAUD = 460800;
+static const uint32_t BAUD = 115200;
 
 // Protocol
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
@@ -271,32 +271,99 @@ bool readExact(uint8_t *dst, size_t n, uint32_t timeoutMs) {
 
 bool readHeaderWithReadyRetry(uint8_t *dst, size_t n, uint32_t timeoutMs) {
   if (!dst || n == 0) return false;
+  if (n < 10) return false;
 
-  uint32_t t0 = millis();
+  const uint32_t startMs = millis();
+  const uint32_t readyIntervalMs = 300;
+  const uint32_t interByteTimeoutMs = 1200;
+  const uint32_t maxReadyAttempts = (timeoutMs / readyIntervalMs) + 2;
+
   uint32_t lastReady = 0;
+  uint32_t lastByteMs = startMs;
   size_t got = 0;
   uint32_t checkCount = 0;
   uint32_t availableCount = 0;
+  const uint8_t magicLo = (uint8_t)(MAGIC & 0xFF);
+  const uint8_t magicHi = (uint8_t)((MAGIC >> 8) & 0xFF);
+  uint32_t discardCount = 0;
+  uint32_t readyAttempts = 0;
 
   Serial.printf("[DER] Starting header read: expecting %u bytes with %lu ms timeout\n", (unsigned)n, timeoutMs);
 
-  while (got < n && (millis() - t0) < timeoutMs) {
-    if ((millis() - lastReady) > 300) {
-      Link.write(READY_BYTE);
+  while (got < n && (millis() - startMs) < timeoutMs) {
+    if ((millis() - lastReady) > readyIntervalMs) {
+      if (readyAttempts >= maxReadyAttempts) {
+        Serial.printf("[DER] Reached READY attempt limit (%lu)\n", (unsigned long)maxReadyAttempts);
+        break;
+      }
+      const uint8_t readyBurst[4] = {READY_BYTE, READY_BYTE, READY_BYTE, READY_BYTE};
+      Link.write(readyBurst, sizeof(readyBurst));
       Link.flush();
-      Serial.printf("[DER] Sent READY (attempt %u)\n", (unsigned)((millis() - t0) / 300));
+      Serial.printf("[DER] Sent READY (attempt %lu)\n", (unsigned long)readyAttempts);
       lastReady = millis();
+      readyAttempts++;
+    }
+
+    if (got > 0 && (millis() - lastByteMs) > interByteTimeoutMs) {
+      Serial.printf("[DER] Header sync stalled; resetting partial buffer (%u bytes)\n", (unsigned)got);
+      discardCount += got;
+      got = 0;
     }
 
     int a = Link.available();
     checkCount++;
     if (a > 0) {
       availableCount++;
-      Serial.printf("[DER] Link.available()=%d at check #%lu\n", a, checkCount);
-      size_t take = min((size_t)a, n - got);
-      got += Link.readBytes((char *)dst + got, take);
-      Serial.printf("[DER] Read %u bytes, total=%u/%u\n", (unsigned)take, (unsigned)got, (unsigned)n);
-      t0 = millis();
+      while (Link.available() > 0 && got < n) {
+        uint8_t b = (uint8_t)Link.read();
+        lastByteMs = millis();
+
+        if (got == 0) {
+          if (b == magicLo) {
+            dst[got++] = b;
+          } else {
+            discardCount++;
+          }
+        } else if (got == 1) {
+          if (b == magicHi) {
+            dst[got++] = b;
+          } else if (b == magicLo) {
+            // Possible new start-of-header overlap.
+            dst[0] = b;
+            got = 1;
+            discardCount++;
+          } else {
+            got = 0;
+            discardCount += 2;
+          }
+        } else {
+          dst[got++] = b;
+        }
+
+        if (got == n) {
+          uint16_t w = read_u16_le(&dst[2]);
+          uint16_t h = read_u16_le(&dst[4]);
+          uint32_t len = read_u32_le(&dst[6]);
+          uint32_t expectedLen = (uint32_t)w * h * 2;
+
+          if (w == 0 || h == 0 || len == 0 || len != expectedLen) {
+            Serial.printf("[DER] Discarding invalid header candidate: w=%u h=%u len=%lu expected=%lu\n",
+                          w,
+                          h,
+                          (unsigned long)len,
+                          (unsigned long)expectedLen);
+            got = 0;
+            discardCount += n;
+          }
+        }
+      }
+
+      if (got > 0) {
+        Serial.printf("[DER] Header sync progress: total=%u/%u (discarded=%lu)\n",
+                      (unsigned)got,
+                      (unsigned)n,
+                      (unsigned long)discardCount);
+      }
     } else {
       delay(2);
     }
@@ -304,6 +371,15 @@ bool readHeaderWithReadyRetry(uint8_t *dst, size_t n, uint32_t timeoutMs) {
 
   Serial.printf("[DER] Header read complete: got=%u/%u, checks=%lu, available_events=%u\n", 
     (unsigned)got, (unsigned)n, checkCount, availableCount);
+
+  if (got == 0) {
+    if (availableCount == 0) {
+      Serial.println("[DER] UART diagnostic: no incoming bytes from LEFT. Check TX/RX crossover and shared GND.");
+    } else if (availableCount < 12) {
+      Serial.println("[DER] UART diagnostic: sparse invalid bytes detected. Likely baud/profile mismatch or wrong LEFT firmware flashed.");
+      Serial.println("[DER] Expected LEFT boot line should show BAUD=115200 and active UART profile.");
+    }
+  }
 
   if (got > 0 && got < n) {
     Serial.printf("[DER] Partial header bytes=%u/%u: ", (unsigned)got, (unsigned)n);
@@ -793,7 +869,7 @@ void loop() {
   Serial.println("[DER] Waiting for LEFT header (sending READY)...");
 
   uint8_t hdr[10];
-  if (!readHeaderWithReadyRetry(hdr, sizeof(hdr), 15000)) {
+  if (!readHeaderWithReadyRetry(hdr, sizeof(hdr), 25000)) {
     Serial.println("[DER] Timeout reading LEFT header");
     esp_camera_fb_return(fb);
     Link.write(ERR_BYTE);

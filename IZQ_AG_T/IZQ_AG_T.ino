@@ -3,10 +3,14 @@
 
 // ================= CONFIG =================
 static const int BTN_PIN = D2;
-static const int TX_PIN  = D7;  // CROSS-WIRED: swapped vs right
-static const int RX_PIN  = D6;  // CROSS-WIRED: swapped vs right
+static const int TX_PIN_PROFILE_A = D7;  // Right RX pin when boards are wired D7<->D7
+static const int RX_PIN_PROFILE_A = D6;  // Right TX pin when boards are wired D6<->D6
+static const int TX_PIN_PROFILE_B = D6;  // Right RX pin when boards are cross-wired TX->RX
+static const int RX_PIN_PROFILE_B = D7;  // Right TX pin when boards are cross-wired TX->RX
+static const bool START_WITH_PROFILE_A = true;
 //static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 460800;
+static const uint32_t BAUD = 115200;
+static const uint32_t UART_PROFILE_SWITCH_MS = 1200;
 
 // Protocolo
 static const uint16_t MAGIC = 0xA55A;
@@ -42,6 +46,31 @@ HardwareSerial Link(1);
 #define PCLK_GPIO_NUM     13
 
 static bool g_busy = false;
+static bool g_useProfileA = START_WITH_PROFILE_A;
+static uint32_t g_lastUartActivityMs = 0;
+
+void beginLink(bool useProfileA) {
+  int rxPin = useProfileA ? RX_PIN_PROFILE_A : RX_PIN_PROFILE_B;
+  int txPin = useProfileA ? TX_PIN_PROFILE_A : TX_PIN_PROFILE_B;
+
+  Link.end();
+  Link.begin(BAUD, SERIAL_8N1, rxPin, txPin);
+
+  Serial.printf("[IZQ] UART profile %c active: TX=D%d RX=D%d BAUD=%lu\n",
+                useProfileA ? 'A' : 'B',
+                txPin,
+                rxPin,
+                BAUD);
+}
+
+void maybeSwitchUartProfile() {
+  if (g_busy) return;
+  if ((millis() - g_lastUartActivityMs) < UART_PROFILE_SWITCH_MS) return;
+
+  g_useProfileA = !g_useProfileA;
+  beginLink(g_useProfileA);
+  g_lastUartActivityMs = millis();
+}
 
 bool waitForAnyByte(uint8_t *outByte, uint32_t timeoutMs) {
   if (!outByte) return false;
@@ -54,6 +83,7 @@ bool waitForAnyByte(uint8_t *outByte, uint32_t timeoutMs) {
     
     if (avail > 0) {
       *outByte = (uint8_t)Link.read();
+      g_lastUartActivityMs = millis();
       Serial.printf("[IZQ] waitForAnyByte: got 0x%02X after %lu checks\n", *outByte, checkCount);
       return true;
     }
@@ -186,6 +216,7 @@ bool waitByte(uint8_t expected, uint32_t timeoutMs) {
     
     if (avail > 0) {
       bytesReceived++;
+      g_lastUartActivityMs = millis();
       Serial.printf("[IZQ] Check #%lu: Link.available()=%d\n", checkCount, avail);
       uint8_t b = Link.read();
       if (b == expected) {
@@ -307,8 +338,8 @@ void setup() {
   pinMode(BTN_PIN, INPUT_PULLUP);
 
   Link.setRxBufferSize(2048);
-  Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
-  Serial.printf("[IZQ] UART Link initialized: TX=D%d RX=D%d BAUD=%lu\n", TX_PIN, RX_PIN, BAUD);
+  beginLink(g_useProfileA);
+  g_lastUartActivityMs = millis();
 
   if (!initCamera()) {
     Serial.println("Error al iniciar cámara izquierda");
@@ -320,6 +351,8 @@ void setup() {
 
 void loop() {
   if (g_busy) return;
+
+  maybeSwitchUartProfile();
 
   if (buttonPressed()) {
     captureAndSend(false);
