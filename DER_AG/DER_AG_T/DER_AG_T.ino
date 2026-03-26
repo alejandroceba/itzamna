@@ -47,6 +47,7 @@ HardwareSerial Link(1);
 #define PCLK_GPIO_NUM     13
 
 static bool g_busy = false;
+static bool g_sdReady = false;
 
 // ================= HELPERS BINARIOS =================
 static uint16_t read_u16_le(const uint8_t *p) {
@@ -73,10 +74,36 @@ uint8_t rgb565ToGray(uint16_t p) {
 uint16_t nextIndex() {
   for (uint16_t i = 1; i < 10000; i++) {
     char tmp[40];
-    snprintf(tmp, sizeof(tmp), "/Right_%04u.pgm", i);
+    snprintf(tmp, sizeof(tmp), "/R%04u.PGM", i);
     if (!SD.exists(tmp)) return i;
   }
   return 9999;
+}
+
+bool sdWriteSelfTest() {
+  const char *testPath = "/.TST";
+  File t = SD.open(testPath, "w");
+  if (!t) {
+    Serial.println("[DER][SD] SELF_TEST_OPEN_FAIL");
+    return false;
+  }
+
+  const char *msg = "ok\n";
+  size_t w = t.write((const uint8_t*)msg, 3);
+  t.close();
+
+  if (w != 3) {
+    Serial.println("[DER][SD] SELF_TEST_WRITE_FAIL");
+    return false;
+  }
+
+  if (!SD.remove(testPath)) {
+    Serial.println("[DER][SD] SELF_TEST_REMOVE_FAIL");
+    return false;
+  }
+
+  Serial.println("[DER][SD] SELF_TEST_OK");
+  return true;
 }
 
 // ================= CÁMARA =================
@@ -158,9 +185,50 @@ bool initCamera() {
 
 // ================= SD =================
 bool initSD() {
-  SPI.begin(7, 8, 9, SD_CS);
-  if (!SD.begin(SD_CS, SPI)) return false;
-  if (SD.cardType() == CARD_NONE) return false;
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+
+  // Give the SD card regulator and card logic time to settle after boot.
+  delay(150);
+
+  static const uint32_t kFreqs[] = {25000000UL, 10000000UL, 4000000UL, 1000000UL};
+  bool mounted = false;
+
+  for (size_t i = 0; i < (sizeof(kFreqs) / sizeof(kFreqs[0])); i++) {
+    uint32_t hz = kFreqs[i];
+    Serial.printf("[DER][SD] SPI.begin(sck=%d, miso=%d, mosi=%d, cs=%d) @ %lu Hz\n",
+                  7, 8, 9, SD_CS, (unsigned long)hz);
+
+    SPI.begin(7, 8, 9, SD_CS);
+    if (SD.begin(SD_CS, SPI, hz)) {
+      mounted = true;
+      break;
+    }
+
+    Serial.printf("[DER][SD] SD.begin fallo @ %lu Hz\n", (unsigned long)hz);
+    SD.end();
+    SPI.end();
+    delay(30);
+  }
+
+  if (!mounted) {
+    Serial.printf("[DER][SD] SD.begin fallo tras probar frecuencias (cardType=%u)\n",
+                  (unsigned)SD.cardType());
+    return false;
+  }
+
+  uint8_t cardType = SD.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("[DER][SD] No hay tarjeta SD");
+    return false;
+  }
+
+  uint64_t cardSizeMB = SD.cardSize() / (1024ULL * 1024ULL);
+  Serial.printf("[DER][SD] SD lista: cardType=%u size=%lluMB\n",
+                (unsigned)cardType,
+                (unsigned long long)cardSizeMB);
+
+  if (!sdWriteSelfTest()) return false;
   return true;
 }
 
@@ -230,13 +298,57 @@ bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
 }
 
 bool saveGrayPGM(const char *path, const uint8_t *gray, uint16_t width, uint16_t height) {
-  File f = SD.open(path, FILE_WRITE);
-  if (!f) return false;
+  if (!g_sdReady) {
+    Serial.println("[DER][SAVE] SD_NOT_READY");
+    return false;
+  }
 
-  f.printf("P5\n%u %u\n255\n", width, height);
+  Serial.printf("[DER][SAVE] OPEN %s\n", path);
+  if (SD.exists(path)) {
+    if (!SD.remove(path)) {
+      Serial.println("[DER][SAVE] REMOVE_OLD_FAIL");
+      return false;
+    }
+  }
+
+  File f = SD.open(path, "w");
+  if (!f) {
+    // Fallback for cores that prefer FILE_WRITE constant.
+    f = SD.open(path, FILE_WRITE);
+  }
+  if (!f) {
+    Serial.println("[DER][SAVE] OPEN_FAIL");
+    return false;
+  }
+
+  int hdr = f.printf("P5\n%u %u\n255\n", width, height);
+  if (hdr <= 0) {
+    Serial.println("[DER][SAVE] HEADER_WRITE_FAIL");
+    f.close();
+    return false;
+  }
+
   size_t total = (size_t)width * height;
-  size_t w = f.write(gray, total);
+  size_t w = 0;
+  const size_t writeChunk = 512;
+
+  while (w < total) {
+    size_t n = min(writeChunk, total - w);
+    size_t wr = f.write(gray + w, n);
+    if (wr == 0) {
+      Serial.printf("[DER][SAVE] WRITE_ZERO at offset=%u remaining=%u\n",
+                    (unsigned)w,
+                    (unsigned)(total - w));
+      break;
+    }
+    w += wr;
+  }
+
   f.close();
+
+  Serial.printf("[DER][SAVE] WRITE expected=%u wrote=%u\n",
+                (unsigned)total,
+                (unsigned)w);
 
   return w == total;
 }
@@ -357,7 +469,8 @@ void setup() {
     while (true) delay(1000);
   }
 
-  if (!initSD()) {
+  g_sdReady = initSD();
+  if (!g_sdReady) {
     Serial.println("Error al iniciar SD");
     while (true) delay(1000);
   }
@@ -377,19 +490,31 @@ void loop() {
 
   uint16_t idx = nextIndex();
 
-  char rightName[40];
-  char leftName[40];
-  char anaName[40];
+  char rightName[24];
+  char leftName[24];
+  char anaName[24];
 
-  snprintf(rightName, sizeof(rightName), "/Right_%04u.pgm", idx);
-  snprintf(leftName,  sizeof(leftName),  "/Left_%04u.pgm", idx);
-  snprintf(anaName,   sizeof(anaName),   "/Anaglyph_%04u.ppm", idx);
+  snprintf(rightName, sizeof(rightName), "/R%04u.PGM", idx);
+  snprintf(leftName,  sizeof(leftName),  "/L%04u.PGM", idx);
+  snprintf(anaName,   sizeof(anaName),   "/A%04u.PPM", idx);
 
   String rightPath = String(rightName);
   String leftPath  = String(leftName);
   String anaPath   = String(anaName);
 
   Serial.println("\n[DER] Trigger detectado");
+
+  if (!g_sdReady) {
+    Serial.println("[DER] SD no lista, reintentando init...");
+    g_sdReady = initSD();
+    if (!g_sdReady) {
+      Serial.println("[DER] SD sigue no disponible, abortando trigger");
+      Link.write(ERR_BYTE);
+      waitButtonRelease();
+      g_busy = false;
+      return;
+    }
+  }
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
@@ -401,6 +526,15 @@ void loop() {
 
   Serial.printf("[DER] width=%u height=%u len=%u format=%u\n",
                 fb->width, fb->height, fb->len, fb->format);
+
+  if (fb->format != PIXFORMAT_RGB565) {
+    Serial.printf("[DER] Formato no soportado para flujo actual: %u\n", fb->format);
+    esp_camera_fb_return(fb);
+    Link.write(ERR_BYTE);
+    waitButtonRelease();
+    g_busy = false;
+    return;
+  }
 
   uint8_t *rightGray = nullptr;
   if (!buildGrayBufferFromFrame(fb, &rightGray)) {

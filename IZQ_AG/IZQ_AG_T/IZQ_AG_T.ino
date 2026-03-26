@@ -242,6 +242,8 @@ void loop() {
   }
 
   Serial.printf("[IZQ] Captura lista, %u bytes\n", (unsigned)fb->len);
+  Serial.printf("[IZQ] width=%u height=%u len=%u format=%u\n",
+                fb->width, fb->height, fb->len, fb->format);
   Serial.println("[IZQ] Esperando READY...");
 
   if (!waitByte(READY_BYTE, 8000)) {
