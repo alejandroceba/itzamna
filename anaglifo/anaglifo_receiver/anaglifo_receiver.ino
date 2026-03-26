@@ -10,6 +10,7 @@ static const uint16_t PACKET_MAGIC = 0xA66A;
 static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
+static const uint8_t PKT_ACK = 4;
 
 // ================= TRANSPORT PACKETS =================
 struct __attribute__((packed)) BeginPacket {
@@ -28,6 +29,40 @@ struct __attribute__((packed)) EndPacket {
   uint16_t totalChunks;
   uint32_t dataLen;
 };
+
+struct __attribute__((packed)) AckPacket {
+  uint8_t type;
+  uint16_t imageId;
+  uint8_t ok;
+  uint16_t chunks;
+  uint32_t bytesCount;
+};
+
+static volatile bool g_havePeer = false;
+uint8_t g_peerMac[6] = {0};
+
+bool sendAck(uint16_t imageId, uint8_t ok, uint16_t chunks, uint32_t bytesCount) {
+  if (!g_havePeer) return false;
+
+  if (!esp_now_is_peer_exist(g_peerMac)) {
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, g_peerMac, 6);
+    peer.channel = WIFI_CHANNEL;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+      return false;
+    }
+  }
+
+  AckPacket ack{};
+  ack.type = PKT_ACK;
+  ack.imageId = imageId;
+  ack.ok = ok;
+  ack.chunks = chunks;
+  ack.bytesCount = bytesCount;
+
+  return esp_now_send(g_peerMac, (const uint8_t *)&ack, sizeof(ack)) == ESP_OK;
+}
 
 // ================= RECEPTION STATE =================
 static volatile bool g_receiving = false;
@@ -71,6 +106,7 @@ void beginNewImage(uint16_t imageId,
 
 void abortImage() {
   if (g_receiving) {
+    sendAck(g_imageId, 0, g_expectedChunk, g_receivedBytes);
     Serial.printf("IMG_END %u 0 %u %lu\n",
                   (unsigned)g_imageId,
                   (unsigned)g_expectedChunk,
@@ -89,6 +125,7 @@ void abortImage() {
 
 void completeImage(uint16_t totalChunks) {
   bool ok = (g_receivedBytes == g_dataLen) && (g_expectedChunk == totalChunks);
+  sendAck(g_imageId, ok ? 1u : 0u, g_expectedChunk, g_receivedBytes);
   Serial.printf("IMG_END %u %u %u %lu\n",
                 (unsigned)g_imageId,
                 ok ? 1u : 0u,
@@ -111,7 +148,10 @@ void completeImage(uint16_t totalChunks) {
 
 // ================= ESP-NOW CALLBACK =================
 void onEspNowReceive(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  (void)info;
+  if (info && info->src_addr) {
+    memcpy(g_peerMac, info->src_addr, 6);
+    g_havePeer = true;
+  }
 
   if (len <= 0 || data == nullptr) {
     g_badPackets++;
