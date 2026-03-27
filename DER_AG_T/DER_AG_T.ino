@@ -9,19 +9,21 @@ static const int BTN_PIN = D2;
 static const int TX_PIN  = D6;
 static const int RX_PIN  = D7;
 //static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 2000000;
+static const uint32_t BAUD = 115200;
 static const int SD_CS = 21;
 
 // Protocolo
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
 static const uint16_t MAGIC = 0xA55A;
+static const uint16_t CHUNK_MARKER = 0xCAFE;
+static const char *PROTO_VERSION = "v4-marker";
 static const uint8_t READY_BYTE     = 0x52; // 'R'
 static const uint8_t ACK_HDR_BYTE   = 0x48; // 'H'
 static const uint8_t ACK_CHUNK_BYTE = 0x43; // 'C'
 static const uint8_t ACK_FINAL_BYTE = 0x06; // ACK
 static const uint8_t ERR_BYTE       = 0x15; // NAK
 
-static const uint16_t CHUNK_SIZE = 512;
+static const uint16_t CHUNK_SIZE = 128;
 
 // ================= EXPOSURE / GAIN =================
 static const int AEC_VALUE = 450;
@@ -201,6 +203,53 @@ bool readExact(uint8_t *dst, size_t n, uint32_t timeoutMs) {
   return got == n;
 }
 
+bool waitForChunkMarker(uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  uint8_t prev = 0;
+  bool havePrev = false;
+  static bool dumpedOnce = false;
+  uint8_t dumpBuf[32];
+  uint8_t dumpCount = 0;
+
+  while ((millis() - t0) < timeoutMs) {
+    if (Link.available()) {
+      uint8_t b = (uint8_t)Link.read();
+      if (!dumpedOnce && dumpCount < sizeof(dumpBuf)) {
+        dumpBuf[dumpCount++] = b;
+      }
+      if (havePrev) {
+        uint16_t v = (uint16_t)prev | ((uint16_t)b << 8);
+        if (v == CHUNK_MARKER) {
+          if (!dumpedOnce) {
+            Serial.print("[DER] First bytes after header: ");
+            for (uint8_t i = 0; i < dumpCount; i++) {
+              Serial.printf("%02X ", dumpBuf[i]);
+            }
+            Serial.println();
+            dumpedOnce = true;
+          }
+          return true;
+        }
+      }
+      prev = b;
+      havePrev = true;
+    } else {
+      delay(1);
+    }
+  }
+
+  if (!dumpedOnce && dumpCount > 0) {
+    Serial.print("[DER] First bytes after header (timeout): ");
+    for (uint8_t i = 0; i < dumpCount; i++) {
+      Serial.printf("%02X ", dumpBuf[i]);
+    }
+    Serial.println();
+    dumpedOnce = true;
+  }
+
+  return false;
+}
+
 // ================= BUFFER GRIS =================
 bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
   if (!fb || !outGray) return false;
@@ -272,13 +321,18 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
   fLeft.printf("P5\n%u %u\n255\n", width, height);
   fAna.printf("P6\n%u %u\n255\n", width, height);
 
-  Link.write(ACK_HDR_BYTE);
-  Link.flush();
-
   uint32_t received = 0;
   uint32_t pixelIndex = 0;
+  uint32_t chunkCount = 0;
 
   while (received < totalLen) {
+    if (!waitForChunkMarker(4000)) {
+      Serial.println("[DER] Timeout esperando marcador de bloque");
+      fLeft.close();
+      fAna.close();
+      return false;
+    }
+
     uint8_t lenBuf[2];
     if (!readExact(lenBuf, 2, 4000)) {
       Serial.println("[DER] Timeout leyendo tamaño de bloque");
@@ -332,9 +386,13 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
     }
 
     received += n;
-
-    Link.write(ACK_CHUNK_BYTE);
-    Link.flush();
+    chunkCount++;
+    if ((chunkCount % 100) == 0) {
+      Serial.printf("[DER] Progreso chunks=%lu bytes=%lu/%lu\n",
+                    (unsigned long)chunkCount,
+                    (unsigned long)received,
+                    (unsigned long)totalLen);
+    }
   }
 
   fLeft.close();
@@ -346,10 +404,12 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
 void setup() {
   Serial.begin(115200);
   delay(800);
+  Serial.printf("[DER] UART Link config TX=%d RX=%d BAUD=%lu\n", TX_PIN, RX_PIN, (unsigned long)BAUD);
+  Serial.printf("[DER] PROTO %s\n", PROTO_VERSION);
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
-  Link.setRxBufferSize(4096);
+  Link.setRxBufferSize(8192);
   Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
 
   if (!initCamera()) {
@@ -428,15 +488,12 @@ void loop() {
 
   Serial.printf("[DER] Derecha guardada en %s\n", rightPath.c_str());
 
-  Link.write(READY_BYTE);
-  Link.flush();
-  Serial.println("[DER] READY enviado, esperando header...");
+  Serial.println("[DER] Esperando header de IZQ...");
 
   uint8_t hdr[10];
-  if (!readExact(hdr, sizeof(hdr), 8000)) {
-    Serial.println("[DER] Timeout leyendo header");
+  if (!readExact(hdr, sizeof(hdr), 15000)) {
+    Serial.println("[DER] Timeout esperando header de IZQ");
     free(rightGray);
-    Link.write(ERR_BYTE);
     waitButtonRelease();
     g_busy = false;
     return;
@@ -450,7 +507,6 @@ void loop() {
   if (magic != MAGIC) {
     Serial.printf("[DER] BAD MAGIC 0x%04X\n", magic);
     free(rightGray);
-    Link.write(ERR_BYTE);
     waitButtonRelease();
     g_busy = false;
     return;
@@ -462,7 +518,6 @@ void loop() {
   if (leftW != rightW || leftH != rightH) {
     Serial.println("[DER] Dimensiones izquierda/derecha no coinciden");
     free(rightGray);
-    Link.write(ERR_BYTE);
     waitButtonRelease();
     g_busy = false;
     return;
@@ -474,7 +529,6 @@ void loop() {
                                   rightGray)) {
     Serial.println("[DER] Error guardando imagen izquierda / anaglifo");
     free(rightGray);
-    Link.write(ERR_BYTE);
     waitButtonRelease();
     g_busy = false;
     return;
@@ -489,10 +543,7 @@ void loop() {
   Serial.printf("[DER] Tiempo total: %lu ms (%.2f s)\n",
               (unsigned long)elapsed,
               elapsed / 1000.0f);
-
-  Link.write(ACK_FINAL_BYTE);
-  Link.flush();
-  Serial.println("[DER] ACK final enviado");
+  Serial.println("[DER] Recepción y guardado completados");
 
   waitButtonRelease();
   g_busy = false;
