@@ -184,6 +184,11 @@ def save_pgm(path: Path, width: int, height: int, pixels: bytes) -> None:
     path.write_bytes(header + pixels)
 
 
+def save_ppm(path: Path, width: int, height: int, pixels: bytes) -> None:
+    header = f"P6\n{width} {height}\n255\n".encode("ascii")
+    path.write_bytes(header + pixels)
+
+
 # %%
 # Runtime setup
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -424,13 +429,14 @@ def handle_img_end(line: str) -> None:
 
     payload = bytes(current_image.payload)
     expected_pixels = current_image.width * current_image.height
+    expected_rgb = expected_pixels * 3
     valid = (
         image_id == current_image.image_id
         and ok == 1
         and chunks == current_image.next_chunk
         and end_bytes == current_image.data_len
         and len(payload) == current_image.data_len
-        and len(payload) == expected_pixels
+        and (len(payload) == expected_pixels or len(payload) == expected_rgb)
     )
 
     if not valid:
@@ -438,18 +444,25 @@ def handle_img_end(line: str) -> None:
         dbg(
             "DROP end_validation "
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
-            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels}"
+            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb={expected_rgb}"
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
         return
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.pgm"
+    is_rgb = len(payload) == expected_rgb
+    ext = "ppm" if is_rgb else "pgm"
+    out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.{ext}"
     out_path = IMAGE_DIR / out_name
-    save_pgm(out_path, current_image.width, current_image.height, payload)
+    if is_rgb:
+        save_ppm(out_path, current_image.width, current_image.height, payload)
+        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
+    else:
+        save_pgm(out_path, current_image.width, current_image.height, payload)
+        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
+        img_artist.set_cmap("gray")
 
-    img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
     img_artist.set_data(img_arr)
     ax_img.set_aspect("equal")
 
@@ -525,13 +538,14 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
 
     payload = bytes(current_image.payload)
     expected_pixels = current_image.width * current_image.height
+    expected_rgb = expected_pixels * 3
     valid = (
         image_id == current_image.image_id
         and ok == 1
         and chunks == current_image.next_chunk
         and end_bytes == current_image.data_len
         and len(payload) == current_image.data_len
-        and len(payload) == expected_pixels
+        and (len(payload) == expected_pixels or len(payload) == expected_rgb)
     )
 
     if not valid:
@@ -539,7 +553,7 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
         dbg(
             "DROP end_validation "
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
-            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels}"
+            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb={expected_rgb}"
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
@@ -547,11 +561,18 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
         return
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.pgm"
+    is_rgb = len(payload) == expected_rgb
+    ext = "ppm" if is_rgb else "pgm"
+    out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.{ext}"
     out_path = IMAGE_DIR / out_name
-    save_pgm(out_path, current_image.width, current_image.height, payload)
+    if is_rgb:
+        save_ppm(out_path, current_image.width, current_image.height, payload)
+        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
+    else:
+        save_pgm(out_path, current_image.width, current_image.height, payload)
+        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
+        img_artist.set_cmap("gray")
 
-    img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
     img_artist.set_data(img_arr)
     ax_img.set_aspect("equal")
 
