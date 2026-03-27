@@ -32,22 +32,22 @@ import serial.tools.list_ports
 
 
 LABELS = [
-    "Packet #",
-    "Distance",
+    "Paquete #",
+    "Distancia",
     "RSSI",
-    "Smoothed RSSI",
-    "Loss Rate",
-    "Throughput",
+    "RSSI Suavizado",
+    "Tasa de Perdida",
+    "Rendimiento",
     "Temp BME280",
     "Temp DS18B20",
-    "Pressure",
-    "Altitude",
-    "Velocity X",
-    "Velocity Y",
-    "Velocity Z",
-    "Accel X",
-    "Accel Y",
-    "Accel Z",
+    "Presion",
+    "Altitud",
+    "Velocidad X",
+    "Velocidad Y",
+    "Velocidad Z",
+    "Aceleracion X",
+    "Aceleracion Y",
+    "Aceleracion Z",
 ]
 UNITS = [
     "#",
@@ -191,11 +191,11 @@ os.makedirs(IMAGE_DIR, exist_ok=True)
 
 selected_port = pick_serial_port(SERIAL_PORT)
 print(f"Serial port: {selected_port}")
-print(f"Sensor log:  {SENSOR_LOG_PATH}")
-print(f"Image dir:   {IMAGE_DIR}")
+print(f"Registro de sensores: {SENSOR_LOG_PATH}")
+print(f"Directorio de imagenes: {IMAGE_DIR}")
 
 ser = open_serial_with_fallback(selected_port, BAUD)
-print(f"Connected to: {ser.port}")
+print(f"Conectado a: {ser.port}")
 
 need_header = not SENSOR_LOG_PATH.exists()
 sensor_log_file = open(SENSOR_LOG_PATH, "a", newline="")
@@ -233,26 +233,26 @@ for i in range(NUM_VARS):
 
 bottom_row_start = (NUM_ROWS - 1) * NUM_COLS
 for idx in range(bottom_row_start, min(bottom_row_start + NUM_COLS, NUM_VARS)):
-    axes[idx].set_xlabel("Timestamp")
+    axes[idx].set_xlabel("Marca de tiempo")
 
 ax_img = fig.add_subplot(gs[:, 2])
 preview = np.zeros((120, 120), dtype=np.uint8)
 img_artist = ax_img.imshow(preview, cmap="gray", vmin=0, vmax=255)
-ax_img.set_title("Latest Received Image")
+ax_img.set_title("Ultima imagen recibida")
 ax_img.set_xticks([])
 ax_img.set_yticks([])
 
 status_text = ax_img.text(
     0.02,
     0.02,
-    "No image yet",
+    "Sin imagen aun",
     transform=ax_img.transAxes,
     color="white",
     fontsize=10,
     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none"),
 )
 
-telemetry_state_text = fig.text(0.01, 0.01, "Sensor stream: waiting", fontsize=10)
+telemetry_state_text = fig.text(0.01, 0.01, "Flujo de sensores: esperando", fontsize=10)
 
 current_image: ImageAssembly | None = None
 current_image_last_activity_mono = 0.0
@@ -352,7 +352,7 @@ def handle_img_begin(line: str) -> None:
     )
     current_image_last_activity_mono = time.monotonic()
     dbg(f"BEGIN id={image_id} w={width} h={height} len={data_len}")
-    status_text.set_text(f"Receiving image id={image_id} ({width}x{height})")
+    status_text.set_text(f"Recibiendo imagen id={image_id} ({width}x{height})")
 
 
 def handle_img_chunk(line: str) -> None:
@@ -373,7 +373,7 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP id_mismatch got={image_id} expected={current_image.image_id} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (id mismatch)")
+        status_text.set_text("Imagen descartada (id no coincide)")
         return
     if chunk_index != current_image.next_chunk:
         # Redundancy mode: tolerate duplicate retransmissions of the previous chunk.
@@ -384,13 +384,13 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP chunk_order got={chunk_index} expected={current_image.next_chunk} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (chunk order)")
+        status_text.set_text("Imagen descartada (orden de bloques)")
         return
     if len(hex_payload) != n * 2:
         dropped_images += 1
         dbg(f"DROP chunk_size hex_len={len(hex_payload)} expected={n*2} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (chunk size mismatch)")
+        status_text.set_text("Imagen descartada (tamano de bloque no coincide)")
         return
 
     try:
@@ -399,7 +399,7 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP invalid_hex line={line}")
         current_image = None
-        status_text.set_text("Image dropped (invalid hex)")
+        status_text.set_text("Imagen descartada (hex invalido)")
         return
 
     current_image.payload.extend(chunk)
@@ -440,7 +440,7 @@ def handle_img_end(line: str) -> None:
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
             f"chunks={current_image.next_chunk} expected_pixels={expected_pixels}"
         )
-        status_text.set_text("Image dropped (end validation)")
+        status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
         return
 
@@ -457,7 +457,7 @@ def handle_img_end(line: str) -> None:
     last_image_time = time.monotonic()
     current_image_last_activity_mono = 0.0
     dbg(f"END_OK line={line} file={out_name}")
-    status_text.set_text(f"Saved image id={image_id} chunks={chunks}\n{out_name}")
+    status_text.set_text(f"Imagen guardada id={image_id} bloques={chunks}\n{out_name}")
     current_image = None
 
 
@@ -475,7 +475,7 @@ def handle_img_begin_bin(image_id: int, width: int, height: int, data_len: int) 
     current_image_last_activity_mono = time.monotonic()
     binary_image_mode_active = True
     dbg(f"BEGIN id={image_id} w={width} h={height} len={data_len}")
-    status_text.set_text(f"Receiving image id={image_id} ({width}x{height})")
+    status_text.set_text(f"Recibiendo imagen id={image_id} ({width}x{height})")
 
 
 def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) -> None:
@@ -489,7 +489,7 @@ def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) 
         dropped_images += 1
         dbg(f"DROP id_mismatch got={image_id} expected={current_image.image_id} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (id mismatch)")
+        status_text.set_text("Imagen descartada (id no coincide)")
         return
     if chunk_index != current_image.next_chunk:
         # Redundancy mode: tolerate duplicate retransmissions of the previous chunk.
@@ -500,13 +500,13 @@ def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) 
         dropped_images += 1
         dbg(f"DROP chunk_order got={chunk_index} expected={current_image.next_chunk} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (chunk order)")
+        status_text.set_text("Imagen descartada (orden de bloques)")
         return
     if len(chunk) != n:
         dropped_images += 1
         dbg(f"DROP chunk_size len={len(chunk)} expected={n} line={line}")
         current_image = None
-        status_text.set_text("Image dropped (chunk size mismatch)")
+        status_text.set_text("Imagen descartada (tamano de bloque no coincide)")
         return
 
     current_image.payload.extend(chunk)
@@ -541,7 +541,7 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
             f"chunks={current_image.next_chunk} expected_pixels={expected_pixels}"
         )
-        status_text.set_text("Image dropped (end validation)")
+        status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
         binary_image_mode_active = False
         return
@@ -559,7 +559,7 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
     last_image_time = time.monotonic()
     current_image_last_activity_mono = 0.0
     dbg(f"END_OK line={line} file={out_name}")
-    status_text.set_text(f"Saved image id={image_id} chunks={chunks}\n{out_name}")
+    status_text.set_text(f"Imagen guardada id={image_id} bloques={chunks}\n{out_name}")
     current_image = None
     binary_image_mode_active = False
 
@@ -814,30 +814,30 @@ def update_plot(_frame: int):
             current_image_last_activity_mono = 0.0
 
     if last_sensor_time == 0.0:
-        telemetry_state_text.set_text("Sensor stream: waiting")
+        telemetry_state_text.set_text("Flujo de sensores: esperando")
         telemetry_state_text.set_color("gray")
     else:
         age = now_mono - last_sensor_time
         if age > SENSOR_TIMEOUT_SEC:
-            telemetry_state_text.set_text(f"Sensor stream: STOPPED ({age:.1f}s)")
+            telemetry_state_text.set_text(f"Flujo de sensores: DETENIDO ({age:.1f}s)")
             telemetry_state_text.set_color("red")
         else:
-            telemetry_state_text.set_text(f"Sensor stream: OK ({age:.2f}s since last)")
+            telemetry_state_text.set_text(f"Flujo de sensores: OK ({age:.2f}s desde el ultimo)")
             telemetry_state_text.set_color("green")
 
     if last_image_time == 0.0:
-        ax_img.set_xlabel(f"Images saved: {saved_images} | dropped: {dropped_images}")
+        ax_img.set_xlabel(f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images}")
     else:
         img_age = now_mono - last_image_time
         ax_img.set_xlabel(
-            f"Images saved: {saved_images} | dropped: {dropped_images} | last image {img_age:.1f}s ago"
+            f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images} | ultima imagen hace {img_age:.1f}s"
         )
 
     return lines + [img_artist, telemetry_state_text, status_text]
 
 
 # %%
-print("Dashboard running in VS Code Interactive Window...")
+print("Panel en ejecucion en la ventana interactiva de VS Code...")
 start_serial_reader()
 ani = animation.FuncAnimation(
     fig,
@@ -873,6 +873,6 @@ try:
 except Exception:
     pass
 
-print("Dashboard stopped.")
+print("Panel detenido.")
 
 # %%
