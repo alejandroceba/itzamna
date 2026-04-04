@@ -622,8 +622,37 @@ void OnReceive(const esp_now_recv_info_t *info, const uint8_t *incomingData, int
   }
 
   const uint8_t *src = info->src_addr;
+  uint8_t pktType = incomingData[0];
+  bool looksLikeImage = (pktType == PKT_BEGIN || pktType == PKT_CHUNK || pktType == PKT_END);
 
   portENTER_CRITICAL_ISR(&g_mux);
+
+  // Prefer packet-shape routing so one MAC can carry both telemetry and image.
+  if (looksLikeImage) {
+    // Learn/refresh image source on first valid begin packet.
+    if (len == (int)sizeof(BeginPacket) && pktType == PKT_BEGIN) {
+      BeginPacket b;
+      memcpy(&b, incomingData, sizeof(BeginPacket));
+      if (b.magic == PACKET_MAGIC) {
+        if (!g_haveImageMac || !macEqual(g_imageMac, src)) {
+          g_imagePeerReady = false;
+        }
+        g_haveImageMac = true;
+        macCopy(g_imageMac, src);
+      }
+    }
+
+    // Also accept chunk/end from the same MAC even if sensor source already set.
+    if (!g_haveImageMac) {
+      g_haveImageMac = true;
+      macCopy(g_imageMac, src);
+      g_imagePeerReady = false;
+    }
+
+    handleImagePacket(incomingData, len);
+    portEXIT_CRITICAL_ISR(&g_mux);
+    return;
+  }
 
   // Route known sensor source.
   if (g_haveSensorMac && macEqual(src, g_sensorMac)) {
@@ -638,29 +667,6 @@ void OnReceive(const esp_now_recv_info_t *info, const uint8_t *incomingData, int
     return;
   }
 
-  // Route known image source.
-  if (g_haveImageMac && macEqual(src, g_imageMac)) {
-    handleImagePacket(incomingData, len);
-    portEXIT_CRITICAL_ISR(&g_mux);
-    return;
-  }
-
-  // First-time learn image source from valid begin packet.
-  if (len == (int)sizeof(BeginPacket) && incomingData[0] == PKT_BEGIN) {
-    BeginPacket b;
-    memcpy(&b, incomingData, sizeof(BeginPacket));
-    if (b.magic == PACKET_MAGIC) {
-      if (!g_haveImageMac || !macEqual(g_imageMac, src)) {
-        g_imagePeerReady = false;
-      }
-      g_haveImageMac = true;
-      macCopy(g_imageMac, src);
-      handleImagePacket(incomingData, len);
-      portEXIT_CRITICAL_ISR(&g_mux);
-      return;
-    }
-  }
-
   // First-time learn sensor source by packet size.
   if (len == (int)sizeof(sensor_packet)) {
     sensor_packet pkt;
@@ -670,18 +676,6 @@ void OnReceive(const esp_now_recv_info_t *info, const uint8_t *incomingData, int
       macCopy(g_sensorMac, src);
     }
     enqueueSensor(pkt, info->rx_ctrl->rssi);
-    portEXIT_CRITICAL_ISR(&g_mux);
-    return;
-  }
-
-  // Fallback: likely image source sending chunk/end before learn.
-  if (incomingData[0] == PKT_CHUNK || incomingData[0] == PKT_END) {
-    if (!g_haveImageMac) {
-      g_haveImageMac = true;
-      macCopy(g_imageMac, src);
-      g_imagePeerReady = false;
-    }
-    handleImagePacket(incomingData, len);
     portEXIT_CRITICAL_ISR(&g_mux);
     return;
   }
