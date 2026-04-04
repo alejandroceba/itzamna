@@ -20,7 +20,9 @@ static const uint8_t PKT_END = 3;
 static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
 static const uint8_t IMAGE_SEND_GAP_MS = 2;
 
-// If sender MAC is unknown, keep broadcast=true for initial integration tests.
+// TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
+// and replace SENDER_MAC with the real unicast target.
+// Keep broadcast only for initial bring-up.
 static const bool IMAGE_SEND_BROADCAST = true;
 static uint8_t SENDER_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
