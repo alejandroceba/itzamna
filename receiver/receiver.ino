@@ -21,11 +21,7 @@ static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
 static const uint8_t PKT_ACK = 4;
 static const uint16_t IMG_MAX_CHUNK_PAYLOAD = 200;
-<<<<<<< HEAD
 static const uint32_t IMG_MAX_IMAGE_BYTES = 300000;   // supports QVGA RGB anaglyph payloads
-=======
-static const uint32_t IMG_MAX_IMAGE_BYTES = 260000;   // allows QVGA RGB (320*240*3 = 230400)
->>>>>>> 11dbab3ae328218a5845bf18484010855647bf16
 static const uint16_t IMG_SERIAL_CHUNK_BYTES = 64;    // smaller lines are more robust over USB CDC serial
 static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 6; // extra pacing reduces host-side parser overruns
 static const uint8_t IMG_SERIAL_CHUNK_DUPLICATES = 2;  // transmit each chunk multiple times for redundancy
@@ -781,17 +777,6 @@ void loop() {
       throughput = (bytesReceived * 8) / 1000.0f;
       bytesReceived = 0;
       lastThroughputCalc = millis();
-    }
-
-    bool imageBusy;
-    portENTER_CRITICAL(&g_mux);
-    imageBusy = g_imgEmitActive || g_imgReadyToEmit || g_imgReceiving;
-    portEXIT_CRITICAL(&g_mux);
-
-    // During image RX/emit, avoid telemetry serial output entirely to keep
-    // IMG_BEGIN/IMG_CHUNK/IMG_END framing stable on the host.
-    if (imageBusy) {
-      continue;
     }
 
     uint16_t activeDivider = SENSOR_PRINT_DIVIDER;
