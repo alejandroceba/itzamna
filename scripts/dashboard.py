@@ -76,7 +76,7 @@ NUM_ROWS = math.ceil(NUM_VARS / NUM_COLS)
 BEGIN_RE = re.compile(r"^IMG_BEGIN\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$")
 CHUNK_RE = re.compile(r"^IMG_CHUNK\s+(\d+)\s+(\d+)\s+(\d+)\s+([0-9A-Fa-f]+)\s*$")
 END_RE = re.compile(r"^IMG_END\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$")
-PROTOCOL_TOKEN_RE = re.compile(r"IMG_BEGIN|IMG_CHUNK|IMG_END|IMG_DBG|RECEIVER_[A-Z_]+|SENSOR_MAC|IMAGE_MAC")
+PROTOCOL_TOKEN_RE = re.compile(r"IMG_BEGIN|IMG_CHUNK|IMG_END|IMG_DBG|RELAY_STATUS|RECEIVER_[A-Z_]+|SENSOR_MAC|IMAGE_MAC")
 
 # Binary image frame protocol from receiver.ino
 SERIAL_IMG_SOF = b"\xA5\x5A"
@@ -258,6 +258,7 @@ status_text = ax_img.text(
 )
 
 telemetry_state_text = fig.text(0.01, 0.01, "Flujo de sensores: esperando", fontsize=10)
+relay_state_text = fig.text(0.36, 0.01, "Relay: esperando estado", fontsize=10)
 
 current_image: ImageAssembly | None = None
 current_image_last_activity_mono = 0.0
@@ -266,6 +267,7 @@ last_sensor_time = 0.0
 last_image_time = 0.0
 saved_images = 0
 dropped_images = 0
+latest_relay_status = "Relay: sin datos"
 
 max_lines_per_update = 6000
 serial_rx_buffer = bytearray()
@@ -754,6 +756,8 @@ def process_serial_buffer() -> bool:
 
 
 def process_non_sensor_line(line: str) -> None:
+    global latest_relay_status
+
     if line.startswith("IMG_BEGIN"):
         if BEGIN_RE.match(line):
             handle_img_begin(line)
@@ -776,6 +780,12 @@ def process_non_sensor_line(line: str) -> None:
     if line.startswith("IMG_DBG"):
         print(line)
         dbg(f"RXDBG {line}")
+        return
+
+    if line.startswith("RELAY_STATUS"):
+        print(line)
+        dbg(f"RXSTAT {line}")
+        latest_relay_status = line
         return
 
     if line.startswith("RECEIVER_") or line.startswith("SENSOR_MAC") or line.startswith("IMAGE_MAC"):
@@ -854,7 +864,10 @@ def update_plot(_frame: int):
             f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images} | ultima imagen hace {img_age:.1f}s"
         )
 
-    return lines + [img_artist, telemetry_state_text, status_text]
+    relay_state_text.set_text(latest_relay_status)
+    relay_state_text.set_color("tab:blue")
+
+    return lines + [img_artist, telemetry_state_text, relay_state_text, status_text]
 
 
 # %%
