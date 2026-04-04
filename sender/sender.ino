@@ -16,6 +16,8 @@
 #include <DallasTemperature.h>
 #include <DFRobot_BMI160.h>
 
+#include <string.h>
+
 // ============================================================================
 // DEBUGGING & CONFIGURATION
 // ============================================================================
@@ -55,6 +57,16 @@ uint8_t receiverMAC[] = {0x98, 0xa3, 0x16, 0xf8, 0x1c, 0x70};  // Receiver MAC a
 const unsigned long SAMPLE_INTERVAL_MS = 10.0;    // 100 Hz sensor reading rate
 const unsigned long SEND_INTERVAL_MS = 1000.0;    // 1 Hz ESP-NOW transmission rate
 
+// Image forwarding modes:
+// 0 = conservative (higher telemetry protection, higher image latency)
+// 1 = faster (lower image latency, still bounded by per-loop budget)
+#define IMG_FORWARD_MODE 0
+
+const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_SAFE = 1;
+const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 4;
+const unsigned long IMG_FORWARD_MIN_GAP_MS_SAFE = 12;
+const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 3;
+
 // ============================================================================
 // SENSOR OBJECT INSTANTIATION
 // ============================================================================
@@ -93,12 +105,55 @@ typedef struct {
 } sensor_packet;
 
 // ============================================================================
+// IMAGE RELAY PACKET STRUCTS (must match receiver image protocol)
+// ============================================================================
+static const uint16_t PACKET_MAGIC = 0xA66A;
+static const uint8_t PKT_BEGIN = 1;
+static const uint8_t PKT_CHUNK = 2;
+static const uint8_t PKT_END = 3;
+static const uint16_t ESPNOW_MAX_PAYLOAD = 250;
+
+struct __attribute__((packed)) BeginPacket {
+  uint8_t type;
+  uint16_t magic;
+  uint16_t imageId;
+  uint16_t width;
+  uint16_t height;
+  uint32_t dataLen;
+  uint16_t chunkPayload;
+};
+
+struct __attribute__((packed)) ImageForwardItem {
+  uint16_t len;
+  uint8_t data[ESPNOW_MAX_PAYLOAD];
+};
+
+static const uint8_t IMG_FORWARD_QUEUE_SIZE = 24;
+
+// ============================================================================
 // GLOBAL VARIABLES - TRANSMISSION
 // ============================================================================
 sensor_packet sensorData;
 uint32_t packetCounter = 0;
 volatile bool transmitFailed = false;
 unsigned long lastTransmitTime = 0;
+
+// ============================================================================
+// GLOBAL VARIABLES - IMAGE RELAY
+// ============================================================================
+ImageForwardItem imageQueue[IMG_FORWARD_QUEUE_SIZE];
+volatile uint8_t imageQueueHead = 0;
+volatile uint8_t imageQueueTail = 0;
+volatile uint32_t imageQueueDrops = 0;
+
+bool haveImageSourceMac = false;
+uint8_t imageSourceMac[6] = {0};
+
+unsigned long lastImageForwardTime = 0;
+uint32_t forwardedImagePackets = 0;
+uint32_t droppedImagePackets = 0;
+
+portMUX_TYPE imageMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============================================================================
 // GLOBAL VARIABLES - SENSOR STATE
@@ -142,9 +197,16 @@ void readAllSensors();
 void integrateVelocity();
 void transmitSensorData();
 void onDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status);
+void onDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len);
 void blinkLEDOnFailure();
 void printDebugHeader();
 void printDebugData();
+void processImageForwarding(unsigned long now);
+bool enqueueImagePacket(const uint8_t *data, uint16_t len);
+bool dequeueImagePacket(ImageForwardItem &out);
+bool isValidImagePacket(const uint8_t *data, int len);
+bool isSameMac(const uint8_t *a, const uint8_t *b);
+void copyMac(uint8_t *dst, const uint8_t *src);
 
 // ============================================================================
 // SETUP - Initialize All Subsystems
@@ -190,6 +252,7 @@ void setup() {
   
   // Register transmission callback
   esp_now_register_send_cb(onDataSent);
+  esp_now_register_recv_cb(onDataReceived);
   
   // Add receiver as peer
   esp_now_peer_info_t peer = {};
@@ -257,6 +320,136 @@ void loop() {
     // Print debug CSV line
     if (DEBUG) {
       printDebugData();
+    }
+  }
+
+  // Relay image packets with a bounded per-loop budget.
+  processImageForwarding(now);
+}
+
+// ============================================================================
+// IMAGE RELAY HELPERS
+// ============================================================================
+bool isSameMac(const uint8_t *a, const uint8_t *b) {
+  for (int i = 0; i < 6; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+void copyMac(uint8_t *dst, const uint8_t *src) {
+  for (int i = 0; i < 6; i++) {
+    dst[i] = src[i];
+  }
+}
+
+bool enqueueImagePacket(const uint8_t *data, uint16_t len) {
+  if (!data || len == 0 || len > ESPNOW_MAX_PAYLOAD) return false;
+
+  uint8_t nextHead = (uint8_t)((imageQueueHead + 1) % IMG_FORWARD_QUEUE_SIZE);
+  if (nextHead == imageQueueTail) {
+    imageQueueDrops++;
+    return false;
+  }
+
+  imageQueue[imageQueueHead].len = len;
+  memcpy(imageQueue[imageQueueHead].data, data, len);
+  imageQueueHead = nextHead;
+  return true;
+}
+
+bool dequeueImagePacket(ImageForwardItem &out) {
+  if (imageQueueTail == imageQueueHead) return false;
+
+  out = imageQueue[imageQueueTail];
+  imageQueueTail = (uint8_t)((imageQueueTail + 1) % IMG_FORWARD_QUEUE_SIZE);
+  return true;
+}
+
+bool isValidImagePacket(const uint8_t *data, int len) {
+  if (!data || len <= 0 || len > ESPNOW_MAX_PAYLOAD) return false;
+
+  uint8_t type = data[0];
+  if (type == PKT_BEGIN) {
+    if (len != (int)sizeof(BeginPacket)) return false;
+    BeginPacket begin{};
+    memcpy(&begin, data, sizeof(BeginPacket));
+    return begin.magic == PACKET_MAGIC;
+  }
+
+  if (type == PKT_CHUNK) {
+    return len >= 7;
+  }
+
+  if (type == PKT_END) {
+    return len == 9;
+  }
+
+  return false;
+}
+
+void onDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
+  if (!info || !incomingData || !isValidImagePacket(incomingData, len)) {
+    return;
+  }
+
+  const uint8_t *src = info->src_addr;
+  uint8_t type = incomingData[0];
+
+  portENTER_CRITICAL_ISR(&imageMux);
+
+  // Learn/refresh source MAC only from valid begin packets.
+  if (type == PKT_BEGIN) {
+    if (!haveImageSourceMac || !isSameMac(imageSourceMac, src)) {
+      copyMac(imageSourceMac, src);
+      haveImageSourceMac = true;
+    }
+  }
+
+  // Accept chunk/end only from learned source.
+  if (!haveImageSourceMac || !isSameMac(imageSourceMac, src)) {
+    portEXIT_CRITICAL_ISR(&imageMux);
+    return;
+  }
+
+  bool queued = enqueueImagePacket(incomingData, (uint16_t)len);
+  if (!queued) {
+    droppedImagePackets++;
+  }
+
+  portEXIT_CRITICAL_ISR(&imageMux);
+}
+
+void processImageForwarding(unsigned long now) {
+  const uint8_t perLoopBudget = (IMG_FORWARD_MODE == 0)
+    ? IMG_FORWARD_PACKETS_PER_LOOP_SAFE
+    : IMG_FORWARD_PACKETS_PER_LOOP_FAST;
+  const unsigned long minGapMs = (IMG_FORWARD_MODE == 0)
+    ? IMG_FORWARD_MIN_GAP_MS_SAFE
+    : IMG_FORWARD_MIN_GAP_MS_FAST;
+
+  if (now - lastImageForwardTime < minGapMs) {
+    return;
+  }
+
+  uint8_t sentThisLoop = 0;
+  while (sentThisLoop < perLoopBudget) {
+    ImageForwardItem item{};
+
+    portENTER_CRITICAL(&imageMux);
+    bool hasItem = dequeueImagePacket(item);
+    portEXIT_CRITICAL(&imageMux);
+
+    if (!hasItem) break;
+
+    esp_err_t err = esp_now_send(receiverMAC, item.data, item.len);
+    if (err == ESP_OK) {
+      forwardedImagePackets++;
+      sentThisLoop++;
+      lastImageForwardTime = now;
+    } else {
+      droppedImagePackets++;
+      break;
     }
   }
 }
