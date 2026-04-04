@@ -1,8 +1,8 @@
 #include <Arduino.h>
 #include "esp_camera.h"
-#include "FS.h"
-#include "SD.h"
-#include "SPI.h"
+#include <esp_now.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
 
 // ================= CONFIG =================
 static const int BTN_PIN = D2;
@@ -10,7 +10,19 @@ static const int TX_PIN  = D6;
 static const int RX_PIN  = D7;
 //static const uint32_t BAUD = 921600;
 static const uint32_t BAUD = 2000000;
-static const int SD_CS = 21;
+static const uint8_t WIFI_CHANNEL = 6;
+
+// Receiver image protocol (forwarded by sender.ino)
+static const uint16_t IMAGE_PACKET_MAGIC = 0xA66A;
+static const uint8_t PKT_BEGIN = 1;
+static const uint8_t PKT_CHUNK = 2;
+static const uint8_t PKT_END = 3;
+static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
+static const uint8_t IMAGE_SEND_GAP_MS = 2;
+
+// If sender MAC is unknown, keep broadcast=true for initial integration tests.
+static const bool IMAGE_SEND_BROADCAST = true;
+static uint8_t SENDER_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Protocolo
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
@@ -22,6 +34,23 @@ static const uint8_t ACK_FINAL_BYTE = 0x06; // ACK
 static const uint8_t ERR_BYTE       = 0x15; // NAK
 
 static const uint16_t CHUNK_SIZE = 512;
+
+struct __attribute__((packed)) BeginPacket {
+  uint8_t type;
+  uint16_t magic;
+  uint16_t imageId;
+  uint16_t width;
+  uint16_t height;
+  uint32_t dataLen;
+  uint16_t chunkPayload;
+};
+
+struct __attribute__((packed)) EndPacket {
+  uint8_t type;
+  uint16_t imageId;
+  uint16_t totalChunks;
+  uint32_t dataLen;
+};
 
 // ================= EXPOSURE / GAIN =================
 static const int AEC_VALUE = 450;
@@ -47,6 +76,8 @@ HardwareSerial Link(1);
 #define PCLK_GPIO_NUM     13
 
 static bool g_busy = false;
+static uint16_t g_imageId = 1;
+static uint8_t g_senderPeerAddr[6] = {0};
 
 // ================= HELPERS BINARIOS =================
 static uint16_t read_u16_le(const uint8_t *p) {
@@ -67,16 +98,6 @@ uint8_t rgb565ToGray(uint16_t p) {
   uint8_t b = ( p        & 0x1F) * 255 / 31;
 
   return (uint8_t)(0.299f * r + 0.587f * g + 0.114f * b);
-}
-
-// ================= RUTAS =================
-uint16_t nextIndex() {
-  for (uint16_t i = 1; i < 10000; i++) {
-    char tmp[40];
-    snprintf(tmp, sizeof(tmp), "/Right_%04u.pgm", i);
-    if (!SD.exists(tmp)) return i;
-  }
-  return 9999;
 }
 
 // ================= CÁMARA =================
@@ -156,12 +177,91 @@ bool initCamera() {
   return true;
 }
 
-// ================= SD =================
-bool initSD() {
-  SPI.begin(7, 8, 9, SD_CS);
-  if (!SD.begin(SD_CS, SPI)) return false;
-  if (SD.cardType() == CARD_NONE) return false;
+// ================= ESP-NOW =================
+bool initEspNow() {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
+  esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+  esp_wifi_set_max_tx_power(78);
+  esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[DER] esp_now_init failed");
+    return false;
+  }
+
+  if (IMAGE_SEND_BROADCAST) {
+    uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    memcpy(g_senderPeerAddr, bcast, sizeof(g_senderPeerAddr));
+  } else {
+    memcpy(g_senderPeerAddr, SENDER_MAC, sizeof(g_senderPeerAddr));
+  }
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, g_senderPeerAddr, 6);
+  peer.channel = WIFI_CHANNEL;
+  peer.encrypt = false;
+
+  if (!esp_now_is_peer_exist(g_senderPeerAddr)) {
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+      Serial.println("[DER] esp_now_add_peer failed");
+      return false;
+    }
+  }
+
   return true;
+}
+
+bool sendEspNowPacket(const uint8_t *data, size_t len) {
+  if (!data || len == 0 || len > 250) return false;
+  esp_err_t err = esp_now_send(g_senderPeerAddr, data, len);
+  if (err != ESP_OK) {
+    Serial.printf("[DER] esp_now_send error: %d\n", err);
+    return false;
+  }
+  if (IMAGE_SEND_GAP_MS > 0) {
+    delay(IMAGE_SEND_GAP_MS);
+  }
+  return true;
+}
+
+bool sendImageBegin(uint16_t imageId, uint16_t width, uint16_t height, uint32_t dataLen) {
+  BeginPacket b{};
+  b.type = PKT_BEGIN;
+  b.magic = IMAGE_PACKET_MAGIC;
+  b.imageId = imageId;
+  b.width = width;
+  b.height = height;
+  b.dataLen = dataLen;
+  b.chunkPayload = IMAGE_CHUNK_PAYLOAD;
+  return sendEspNowPacket((const uint8_t *)&b, sizeof(b));
+}
+
+bool sendImageChunk(uint16_t imageId, uint16_t chunkIndex, const uint8_t *payload, uint16_t n) {
+  if (!payload || n == 0 || n > IMAGE_CHUNK_PAYLOAD) return false;
+
+  uint8_t pkt[7 + IMAGE_CHUNK_PAYLOAD];
+  pkt[0] = PKT_CHUNK;
+  pkt[1] = (uint8_t)(imageId & 0xFF);
+  pkt[2] = (uint8_t)((imageId >> 8) & 0xFF);
+  pkt[3] = (uint8_t)(chunkIndex & 0xFF);
+  pkt[4] = (uint8_t)((chunkIndex >> 8) & 0xFF);
+  pkt[5] = (uint8_t)(n & 0xFF);
+  pkt[6] = (uint8_t)((n >> 8) & 0xFF);
+  memcpy(&pkt[7], payload, n);
+
+  return sendEspNowPacket(pkt, (size_t)(7 + n));
+}
+
+bool sendImageEnd(uint16_t imageId, uint16_t totalChunks, uint32_t dataLen) {
+  EndPacket e{};
+  e.type = PKT_END;
+  e.imageId = imageId;
+  e.totalChunks = totalChunks;
+  e.dataLen = dataLen;
+  return sendEspNowPacket((const uint8_t *)&e, sizeof(e));
 }
 
 // ================= BOTÓN =================
@@ -229,21 +329,8 @@ bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
   return true;
 }
 
-bool saveGrayPGM(const char *path, const uint8_t *gray, uint16_t width, uint16_t height) {
-  File f = SD.open(path, FILE_WRITE);
-  if (!f) return false;
-
-  f.printf("P5\n%u %u\n255\n", width, height);
-  size_t total = (size_t)width * height;
-  size_t w = f.write(gray, total);
-  f.close();
-
-  return w == total;
-}
-
 // ================= RECEPCIÓN IZQUIERDA + ANAGLIFO =================
-bool receiveLeftAndBuildOutputs(const char *leftPath,
-                                const char *anaglyphPath,
+bool receiveLeftAndSendAnaglyph(uint16_t imageId,
                                 uint16_t width,
                                 uint16_t height,
                                 uint32_t totalLen,
@@ -255,35 +342,26 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
     return false;
   }
 
-  File fLeft = SD.open(leftPath, FILE_WRITE);
-  if (!fLeft) {
-    Serial.println("[DER] No se pudo abrir archivo izquierdo");
+  uint32_t anaglyphLen = (uint32_t)width * height * 3;
+  if (!sendImageBegin(imageId, width, height, anaglyphLen)) {
+    Serial.println("[DER] No se pudo enviar PKT_BEGIN");
     return false;
   }
-
-  File fAna = SD.open(anaglyphPath, FILE_WRITE);
-  if (!fAna) {
-    Serial.println("[DER] No se pudo abrir archivo anaglifo");
-    fLeft.close();
-    return false;
-  }
-
-  // Cabeceras
-  fLeft.printf("P5\n%u %u\n255\n", width, height);
-  fAna.printf("P6\n%u %u\n255\n", width, height);
 
   Link.write(ACK_HDR_BYTE);
   Link.flush();
 
   uint32_t received = 0;
   uint32_t pixelIndex = 0;
+  uint8_t imgPayload[IMAGE_CHUNK_PAYLOAD];
+  uint16_t imgPayloadLen = 0;
+  uint16_t chunkIndex = 0;
+  uint32_t sentAnaglyphBytes = 0;
 
   while (received < totalLen) {
     uint8_t lenBuf[2];
     if (!readExact(lenBuf, 2, 4000)) {
       Serial.println("[DER] Timeout leyendo tamaño de bloque");
-      fLeft.close();
-      fAna.close();
       return false;
     }
 
@@ -291,23 +369,17 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
 
     if (n == 0 || n > CHUNK_SIZE || (received + n) > totalLen) {
       Serial.printf("[DER] Bloque inválido: %u\n", n);
-      fLeft.close();
-      fAna.close();
       return false;
     }
 
     if (n % 2 != 0) {
       Serial.println("[DER] Bloque RGB565 impar");
-      fLeft.close();
-      fAna.close();
       return false;
     }
 
     uint8_t buf[CHUNK_SIZE];
     if (!readExact(buf, n, 4000)) {
       Serial.println("[DER] Timeout leyendo bloque");
-      fLeft.close();
-      fAna.close();
       return false;
     }
 
@@ -315,18 +387,23 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
 
-      // Guardar PGM izquierda
-      fLeft.write(leftGray);
-
       // Anaglifo:
       // R = izquierda
       // G = derecha
       // B = derecha
-      uint8_t rgb[3];
-      rgb[0] = leftGray;
-      rgb[1] = rightGray[pixelIndex];
-      rgb[2] = rightGray[pixelIndex];
-      fAna.write(rgb, 3);
+      imgPayload[imgPayloadLen++] = leftGray;
+      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
+      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
+
+      if (imgPayloadLen == IMAGE_CHUNK_PAYLOAD) {
+        if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
+          Serial.println("[DER] No se pudo enviar PKT_CHUNK");
+          return false;
+        }
+        sentAnaglyphBytes += imgPayloadLen;
+        chunkIndex++;
+        imgPayloadLen = 0;
+      }
 
       pixelIndex++;
     }
@@ -337,8 +414,27 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
     Link.flush();
   }
 
-  fLeft.close();
-  fAna.close();
+  if (imgPayloadLen > 0) {
+    if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
+      Serial.println("[DER] No se pudo enviar último PKT_CHUNK");
+      return false;
+    }
+    sentAnaglyphBytes += imgPayloadLen;
+    chunkIndex++;
+  }
+
+  if (sentAnaglyphBytes != anaglyphLen) {
+    Serial.printf("[DER] Mismatch bytes anaglifo: enviados=%lu esperados=%lu\n",
+                  (unsigned long)sentAnaglyphBytes,
+                  (unsigned long)anaglyphLen);
+    return false;
+  }
+
+  if (!sendImageEnd(imageId, chunkIndex, anaglyphLen)) {
+    Serial.println("[DER] No se pudo enviar PKT_END");
+    return false;
+  }
+
   return true;
 }
 
@@ -357,8 +453,8 @@ void setup() {
     while (true) delay(1000);
   }
 
-  if (!initSD()) {
-    Serial.println("Error al iniciar SD");
+  if (!initEspNow()) {
+    Serial.println("Error al iniciar ESP-NOW");
     while (true) delay(1000);
   }
 
@@ -374,20 +470,7 @@ void loop() {
   while (Link.available()) Link.read();
 
   uint32_t tStart = millis();
-
-  uint16_t idx = nextIndex();
-
-  char rightName[40];
-  char leftName[40];
-  char anaName[40];
-
-  snprintf(rightName, sizeof(rightName), "/Right_%04u.pgm", idx);
-  snprintf(leftName,  sizeof(leftName),  "/Left_%04u.pgm", idx);
-  snprintf(anaName,   sizeof(anaName),   "/Anaglyph_%04u.ppm", idx);
-
-  String rightPath = String(rightName);
-  String leftPath  = String(leftName);
-  String anaPath   = String(anaName);
+  uint16_t imageId = g_imageId++;
 
   Serial.println("\n[DER] Trigger detectado");
 
@@ -411,22 +494,10 @@ void loop() {
     return;
   }
 
-  if (!saveGrayPGM(rightPath.c_str(), rightGray, fb->width, fb->height)) {
-    Serial.println("[DER] Error guardando imagen derecha");
-    free(rightGray);
-    esp_camera_fb_return(fb);
-    Link.write(ERR_BYTE);
-    waitButtonRelease();
-    g_busy = false;
-    return;
-  }
-
   uint16_t rightW = fb->width;
   uint16_t rightH = fb->height;
 
   esp_camera_fb_return(fb);
-
-  Serial.printf("[DER] Derecha guardada en %s\n", rightPath.c_str());
 
   Link.write(READY_BYTE);
   Link.flush();
@@ -468,11 +539,10 @@ void loop() {
     return;
   }
 
-  if (!receiveLeftAndBuildOutputs(leftPath.c_str(),
-                                  anaPath.c_str(),
+  if (!receiveLeftAndSendAnaglyph(imageId,
                                   leftW, leftH, totalLen,
                                   rightGray)) {
-    Serial.println("[DER] Error guardando imagen izquierda / anaglifo");
+    Serial.println("[DER] Error generando/enviando anaglifo");
     free(rightGray);
     Link.write(ERR_BYTE);
     waitButtonRelease();
@@ -481,9 +551,7 @@ void loop() {
   }
 
   free(rightGray);
-
-  Serial.printf("[DER] Izquierda guardada en %s\n", leftPath.c_str());
-  Serial.printf("[DER] Anaglifo guardado en %s\n", anaPath.c_str());
+  Serial.printf("[DER] Imagen enviada por ESP-NOW, imageId=%u\n", imageId);
 
   uint32_t elapsed = millis() - tStart;
   Serial.printf("[DER] Tiempo total: %lu ms (%.2f s)\n",
