@@ -152,6 +152,9 @@ uint8_t imageSourceMac[6] = {0};
 unsigned long lastImageForwardTime = 0;
 uint32_t forwardedImagePackets = 0;
 uint32_t droppedImagePackets = 0;
+uint32_t invalidImagePackets = 0;
+uint32_t rejectedSourcePackets = 0;
+unsigned long lastRelayStatusPrint = 0;
 
 portMUX_TYPE imageMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -325,6 +328,25 @@ void loop() {
 
   // Relay image packets with a bounded per-loop budget.
   processImageForwarding(now);
+
+  if (DEBUG && (now - lastRelayStatusPrint) >= 2000) {
+    uint8_t queued;
+    portENTER_CRITICAL(&imageMux);
+    queued = (uint8_t)((imageQueueHead + IMG_FORWARD_QUEUE_SIZE - imageQueueTail) % IMG_FORWARD_QUEUE_SIZE);
+    portEXIT_CRITICAL(&imageMux);
+
+    Serial.printf(
+      "RELAY_STATUS mode=%u queued=%u qdrops=%lu forwarded=%lu dropped=%lu invalid=%lu src_reject=%lu\n",
+      (unsigned)IMG_FORWARD_MODE,
+      (unsigned)queued,
+      (unsigned long)imageQueueDrops,
+      (unsigned long)forwardedImagePackets,
+      (unsigned long)droppedImagePackets,
+      (unsigned long)invalidImagePackets,
+      (unsigned long)rejectedSourcePackets
+    );
+    lastRelayStatusPrint = now;
+  }
 }
 
 // ============================================================================
@@ -390,6 +412,7 @@ bool isValidImagePacket(const uint8_t *data, int len) {
 
 void onDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
   if (!info || !incomingData || !isValidImagePacket(incomingData, len)) {
+    invalidImagePackets++;
     return;
   }
 
@@ -408,6 +431,7 @@ void onDataReceived(const esp_now_recv_info_t *info, const uint8_t *incomingData
 
   // Accept chunk/end only from learned source.
   if (!haveImageSourceMac || !isSameMac(imageSourceMac, src)) {
+    rejectedSourcePackets++;
     portEXIT_CRITICAL_ISR(&imageMux);
     return;
   }
