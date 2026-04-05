@@ -326,7 +326,7 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
   uint32_t chunkCount = 0;
 
   while (received < totalLen) {
-    if (!waitForChunkMarker(4000)) {
+    if (!waitForChunkMarker(10000)) {
       Serial.println("[DER] Timeout esperando marcador de bloque");
       fLeft.close();
       fAna.close();
@@ -334,7 +334,7 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
     }
 
     uint8_t lenBuf[2];
-    if (!readExact(lenBuf, 2, 4000)) {
+    if (!readExact(lenBuf, 2, 10000)) {
       Serial.println("[DER] Timeout leyendo tamaño de bloque");
       fLeft.close();
       fAna.close();
@@ -358,31 +358,49 @@ bool receiveLeftAndBuildOutputs(const char *leftPath,
     }
 
     uint8_t buf[CHUNK_SIZE];
-    if (!readExact(buf, n, 4000)) {
+    if (!readExact(buf, n, 10000)) {
       Serial.println("[DER] Timeout leyendo bloque");
       fLeft.close();
       fAna.close();
       return false;
     }
 
+    size_t pixelCount = n / 2;
+    uint8_t leftChunk[CHUNK_SIZE / 2];
+    uint8_t anaChunk[(CHUNK_SIZE / 2) * 3];
+
     for (uint16_t i = 0; i < n; i += 2) {
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
+      size_t outIndex = i / 2;
 
-      // Guardar PGM izquierda
-      fLeft.write(leftGray);
+      leftChunk[outIndex] = leftGray;
 
       // Anaglifo:
       // R = izquierda
       // G = derecha
       // B = derecha
-      uint8_t rgb[3];
-      rgb[0] = leftGray;
-      rgb[1] = rightGray[pixelIndex];
-      rgb[2] = rightGray[pixelIndex];
-      fAna.write(rgb, 3);
+      uint8_t rightValue = rightGray[pixelIndex];
+      size_t rgbIndex = outIndex * 3;
+      anaChunk[rgbIndex + 0] = leftGray;
+      anaChunk[rgbIndex + 1] = rightValue;
+      anaChunk[rgbIndex + 2] = rightValue;
 
       pixelIndex++;
+    }
+
+    if (fLeft.write(leftChunk, pixelCount) != pixelCount) {
+      Serial.println("[DER] Error escribiendo bloque izquierda");
+      fLeft.close();
+      fAna.close();
+      return false;
+    }
+
+    if (fAna.write(anaChunk, pixelCount * 3) != pixelCount * 3) {
+      Serial.println("[DER] Error escribiendo bloque anaglifo");
+      fLeft.close();
+      fAna.close();
+      return false;
     }
 
     received += n;
@@ -409,7 +427,7 @@ void setup() {
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
-  Link.setRxBufferSize(8192);
+  Link.setRxBufferSize(16384);
   Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
 
   if (!initCamera()) {
