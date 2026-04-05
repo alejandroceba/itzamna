@@ -443,15 +443,9 @@ bool receiveLeftAndSendAnaglyph(uint16_t imageId,
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
 
-      // Anaglifo:
-      // R = izquierda
-      // G = derecha
-      // B = derecha
-      imgPayload[imgPayloadLen++] = leftGray;
-      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
-      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
-
-      if (imgPayloadLen == IMAGE_CHUNK_PAYLOAD) {
+      // Ensure room for a full RGB triplet. IMAGE_CHUNK_PAYLOAD (200) is not
+      // divisible by 3, so flush when less than 3 bytes remain.
+      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 3)) {
         if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
           Serial.println("[DER] No se pudo enviar PKT_CHUNK");
           return false;
@@ -460,6 +454,14 @@ bool receiveLeftAndSendAnaglyph(uint16_t imageId,
         chunkIndex++;
         imgPayloadLen = 0;
       }
+
+      // Anaglifo:
+      // R = izquierda
+      // G = derecha
+      // B = derecha
+      imgPayload[imgPayloadLen++] = leftGray;
+      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
+      imgPayload[imgPayloadLen++] = rightGray[pixelIndex];
 
       pixelIndex++;
     }
