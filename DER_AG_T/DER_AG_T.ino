@@ -23,8 +23,8 @@ static const uint8_t IMAGE_SEND_GAP_MS = 2;
 // TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
 // and replace SENDER_MAC with the real unicast target.
 // Keep broadcast only for initial bring-up.
-static const bool IMAGE_SEND_BROADCAST = true;
-static uint8_t SENDER_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const bool IMAGE_SEND_BROADCAST = false;
+static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0xAC, 0xAF, 0x4C};
 
 // Protocolo
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
