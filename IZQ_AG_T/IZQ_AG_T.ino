@@ -6,17 +6,19 @@ static const int BTN_PIN = D2;
 static const int TX_PIN  = D6;
 static const int RX_PIN  = D7;
 //static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 2000000;
+static const uint32_t BAUD = 115200;
 
 // Protocolo
 static const uint16_t MAGIC = 0xA55A;
+static const uint16_t CHUNK_MARKER = 0xCAFE;
+static const char *PROTO_VERSION = "v4-marker";
 static const uint8_t READY_BYTE     = 0x52; // 'R'
 static const uint8_t ACK_HDR_BYTE   = 0x48; // 'H'
 static const uint8_t ACK_CHUNK_BYTE = 0x43; // 'C'
 static const uint8_t ACK_FINAL_BYTE = 0x06; // ACK
 static const uint8_t ERR_BYTE       = 0x15; // NAK
 
-static const uint16_t CHUNK_SIZE = 512;
+static const uint16_t CHUNK_SIZE = 128;
 
 // ================= EXPOSURE / GAIN =================
 static const int AEC_VALUE = 450;
@@ -164,6 +166,20 @@ bool waitByte(uint8_t expected, uint32_t timeoutMs) {
   return false;
 }
 
+bool waitReadyWithDebug(uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    if (Link.available()) {
+      uint8_t b = Link.read();
+      if (b == READY_BYTE) return true;
+      Serial.printf("[IZQ] Byte recibido mientras esperaba READY: 0x%02X\n", b);
+    } else {
+      delay(1);
+    }
+  }
+  return false;
+}
+
 
 bool sendHeader(camera_fb_t *fb) {
   uint8_t hdr[10];
@@ -180,26 +196,20 @@ bool sendFrameChunked(camera_fb_t *fb) {
     return false;
   }
 
-  if (!waitByte(ACK_HDR_BYTE, 3000)) {
-    Serial.println("[IZQ] No llegó ACK_HDR");
-    return false;
-  }
-
   uint32_t sent = 0;
   while (sent < fb->len) {
     uint16_t n = (uint16_t)min<uint32_t>(CHUNK_SIZE, fb->len - sent);
 
+    uint8_t markerBuf[2];
+    write_u16_le(markerBuf, CHUNK_MARKER);
     uint8_t lenBuf[2];
     write_u16_le(lenBuf, n);
 
+    if (Link.write(markerBuf, 2) != 2) return false;
     if (Link.write(lenBuf, 2) != 2) return false;
     if (Link.write(fb->buf + sent, n) != n) return false;
     Link.flush();
-
-    if (!waitByte(ACK_CHUNK_BYTE, 3000)) {
-      Serial.printf("[IZQ] No llegó ACK_CHUNK en offset=%lu\n", (unsigned long)sent);
-      return false;
-    }
+    delay(12);
 
     sent += n;
   }
@@ -210,10 +220,12 @@ bool sendFrameChunked(camera_fb_t *fb) {
 void setup() {
   Serial.begin(115200);
   delay(800);
+  Serial.printf("[IZQ] UART Link config TX=%d RX=%d BAUD=%lu\n", TX_PIN, RX_PIN, (unsigned long)BAUD);
+  Serial.printf("[IZQ] PROTO %s\n", PROTO_VERSION);
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
-  Link.setRxBufferSize(2048);
+  Link.setRxBufferSize(8192);
   Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
 
   if (!initCamera()) {
@@ -229,7 +241,6 @@ void loop() {
   if (!buttonPressed()) return;
 
   g_busy = true;
-  while (Link.available()) Link.read();
 
   Serial.println("\n[IZQ] Trigger detectado");
 
@@ -242,17 +253,9 @@ void loop() {
   }
 
   Serial.printf("[IZQ] Captura lista, %u bytes\n", (unsigned)fb->len);
-  Serial.println("[IZQ] Esperando READY...");
-
-  if (!waitByte(READY_BYTE, 8000)) {
-    Serial.println("[IZQ] No llegó READY");
-    esp_camera_fb_return(fb);
-    waitButtonRelease();
-    g_busy = false;
-    return;
-  }
-
-  Serial.println("[IZQ] READY recibido, enviando imagen por bloques...");
+  Serial.println("[IZQ] Enviando imagen por bloques...");
+  Serial.println("[IZQ] Esperando 1200 ms para sincronizar DER...");
+  delay(1200);
 
   if (!sendFrameChunked(fb)) {
     Serial.println("[IZQ] Error enviando imagen");
@@ -263,14 +266,7 @@ void loop() {
   }
 
   esp_camera_fb_return(fb);
-
-  if (waitByte(ACK_FINAL_BYTE, 8000)) {
-    Serial.println("[IZQ] Imagen enviada y guardada correctamente");
-  } else if (waitByte(ERR_BYTE, 300)) {
-    Serial.println("[IZQ] La derecha reportó error");
-  } else {
-    Serial.println("[IZQ] No llegó ACK final");
-  }
+  Serial.println("[IZQ] Imagen enviada");
 
   waitButtonRelease();
   g_busy = false;
