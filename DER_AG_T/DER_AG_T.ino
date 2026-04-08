@@ -18,7 +18,7 @@ static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
 static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
-static const uint8_t IMAGE_SEND_GAP_MS = 2;
+static const uint8_t IMAGE_SEND_GAP_MS = 10;
 
 // TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
 // and replace SENDER_MAC with the real unicast target.
@@ -220,7 +220,22 @@ bool initEspNow() {
 
 bool sendEspNowPacket(const uint8_t *data, size_t len) {
   if (!data || len == 0 || len > 250) return false;
-  esp_err_t err = esp_now_send(g_senderPeerAddr, data, len);
+
+  esp_err_t err = ESP_FAIL;
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    err = esp_now_send(g_senderPeerAddr, data, len);
+    if (err == ESP_OK) {
+      break;
+    }
+
+    if (err == ESP_ERR_ESPNOW_NO_MEM) {
+      delay((attempt + 1) * 4);
+      continue;
+    }
+
+    break;
+  }
+
   if (err != ESP_OK) {
     Serial.printf("[DER] esp_now_send error: %d\n", err);
     return false;
