@@ -210,6 +210,7 @@ bool dequeueImagePacket(ImageForwardItem &out);
 bool isValidImagePacket(const uint8_t *data, int len);
 bool isSameMac(const uint8_t *a, const uint8_t *b);
 void copyMac(uint8_t *dst, const uint8_t *src);
+float randomFloat(float minValue, float maxValue);
 
 // ============================================================================
 // SETUP - Initialize All Subsystems
@@ -482,134 +483,32 @@ void processImageForwarding(unsigned long now) {
 // SENSOR INITIALIZATION
 // ============================================================================
 void initializeSensors() {
-  // --- Initialize I2C Bus for BMI160 ---
-  Serial.println("Initializing I2C bus...");
-  Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);
-
-  // Initialize BMI160 via I2C
-  if (bmi.I2cInit(BMI160_I2C_ADDR) != BMI160_OK) {
-    Serial.println("ERROR: BMI160 I2C initialization failed");
-    while (1);  // Halt execution
-  }
-  
-  Serial.println("✓ BMI160 initialized\n");
-  
-  // --- Initialize SPI Bus and BME280 ---
-  Serial.println("Initializing SPI and BME280...");
-  SPI.begin(BME_SCK, BME_MISO, BME_MOSI, BME_CS);
-  pinMode(BME_CS, OUTPUT);
-  digitalWrite(BME_CS, HIGH);
-  
-  if (!bme.begin(BME_CS)) {
-    Serial.println("ERROR: BME280 initialization failed");
-    while (1);  // Halt execution
-  }
-  
-  Serial.println("✓ BME280 initialized\n");
-  
-  // --- Initialize OneWire and DS18B20 ---
-  Serial.println("Initializing DS18B20...");
-  ds18b20.begin();
-  
-  Serial.println("✓ DS18B20 initialized\n");
+  randomSeed(esp_random());
+  Serial.println("Mock sensor data enabled\n");
 }
 
 // ============================================================================
 // ACCELEROMETER BIAS CALIBRATION
 // ============================================================================
 void calibrateAccelerometer() {
-  Serial.println("================================");
-  Serial.println("ACCELEROMETER CALIBRATION");
-  Serial.println("DO NOT MOVE THE DEVICE");
-  Serial.println("================================");
-  
-  Wire.beginTransmission(BMI160_I2C_ADDR); 
-  Wire.write(0x7E); // Command register 
-  Wire.write(0x37); // Start accelerometer offset calibration 
-  Wire.endTransmission(); 
-  delay(100); // Wait for calibration to complete
-
-Serial.println("Accelerometer Auto-Calibration Complete"); 
-
-  // Reset bias accumulators
   bias_accel_x = 0.0;
   bias_accel_y = 0.0;
   bias_accel_z = 0.0;
-  
-  // Collect MUESTRAS_BIAS samples
-  for (int i = 0; i < MUESTRAS_BIAS; i++) {
-    // Read raw sensor data
-    bmi.getAccelGyroData(rawSensorData);
-    
-    // Convert raw values to g (gravity units)
-    float ax_g = rawSensorData[3] ;
-    float ay_g = rawSensorData[4] ;
-    float az_g = rawSensorData[5] ;
-    
-    // Convert to m/s²
-    float ax_ms2 = ax_g * (9.81/ ACCEL_SCALE);
-    float ay_ms2 = ay_g * (9.81/ ACCEL_SCALE);
-    float az_ms2 = az_g * (9.81/ ACCEL_SCALE);
-    
-    // Accumulate bias
-    bias_accel_x += ax_ms2;
-    bias_accel_y += ay_ms2;
-    bias_accel_z += az_ms2;
-    
-    delay(5);  // Small delay between samples
-  }
-  
-  // Average the bias
-  bias_accel_x /= MUESTRAS_BIAS;
-  bias_accel_y /= MUESTRAS_BIAS;
-  bias_accel_z /= MUESTRAS_BIAS;
-  
-  if (DEBUG) {
-    Serial.printf("Bias X: %.4f m/s²\n", bias_accel_x);
-    Serial.printf("Bias Y: %.4f m/s²\n", bias_accel_y);
-    Serial.printf("Bias Z: %.4f m/s²\n\n", bias_accel_z);
-  }
 }
 
 // ============================================================================
 // READ ALL SENSORS AT 100 Hz
 // ============================================================================
 void readAllSensors() {
-  // --- Read BME280 (pressure, altitude, temperature) ---
-  sensorData.temperature_bme280 = bme.readTemperature();
-  sensorData.pressure_hpa = (bme.readPressure() / 100.0) - 19.0;  // Pa → hPa, offset correction
-  sensorData.altitude_m = bme.readAltitude(1013.25);
-  
-  // --- Read DS18B20 (external temperature) ---
-  // Note: DS18B20 requires async request/read cycle
-  ds18b20.requestTemperatures();
-  sensorData.temperature_ds18b20 = ds18b20.getTempCByIndex(0);
-  
-  // --- Read BMI160 (accelerometer) ---
-  bmi.getAccelGyroData(rawSensorData);
-  
-  // Convert raw accelerometer values to m/s²
-  // [3], [4], [5] are accelerometer X, Y, Z
-  float ax_raw_ms2 = rawSensorData[3] * (9.81/ ACCEL_SCALE);  // Convert to g
-  float ay_raw_ms2 = rawSensorData[4] * (9.81/ ACCEL_SCALE);
-  float az_raw_ms2 = rawSensorData[5] * (9.81/ ACCEL_SCALE);
-  
+  sensorData.temperature_bme280 = randomFloat(18.0f, 32.0f);
+  sensorData.temperature_ds18b20 = randomFloat(18.0f, 32.0f);
+  sensorData.pressure_hpa = randomFloat(920.0f, 1040.0f);
+  sensorData.altitude_m = randomFloat(0.0f, 2500.0f);
 
-  // Apply bias correction (remove calibration offset)
-  float ax = ax_raw_ms2 - bias_accel_x;
-  float ay = ay_raw_ms2 - bias_accel_y;
-  float az = az_raw_ms2 - bias_accel_z;
-  
-  // Apply gravity compensation (Z-axis points upward, gravity = -9.81 m/s²)
-  // Remove gravitational component so Z-axis true acceleration remains
-    //static float current_accel_x = 0, current_accel_y = 0, current_accel_z = 0;
-    float beta = 0.95;
-    current_accel_x = beta * current_accel_x + (1 - beta) * ax;
-    current_accel_y = beta * current_accel_y + (1 - beta) * ay;
-    current_accel_z = beta * current_accel_z + (1 - beta) * az;
+  current_accel_x = randomFloat(-2.0f, 2.0f);
+  current_accel_y = randomFloat(-2.0f, 2.0f);
+  current_accel_z = randomFloat(-2.0f, 2.0f);
 
-  // Store corrected acceleration in packet
   sensorData.accel_x = current_accel_x;
   sensorData.accel_y = current_accel_y;
   sensorData.accel_z = current_accel_z;
@@ -619,24 +518,11 @@ void readAllSensors() {
 // INTEGRATE ACCELERATION TO VELOCITY
 // ============================================================================
 void integrateVelocity() {
-  // Calculate time delta since last integration
-  const unsigned long sampleInterval = 10; // 100 Hz
-  float dt = sampleInterval / 1000.0;
-  
-  // Guard against invalid dt
-  if (dt <= 0 || dt > 1.0) {
-    return;  // Skip if dt is invalid (shouldn't happen with 10ms interval)
-  }
-  
-  // Integrate: velocity += acceleration * dt
+  const float dt = 0.01f;
   velocity_integral_x += current_accel_x * dt;
   velocity_integral_y += current_accel_y * dt;
   velocity_integral_z += current_accel_z * dt;
-  
-  // --- Reset velocity to zero if motion below sensitivity threshold ---
-  // This prevents drift when the sensor is stationary
 
-  // Store integrated velocity in packet
   sensorData.velocity_x = velocity_integral_x;
   sensorData.velocity_y = velocity_integral_y;
   sensorData.velocity_z = velocity_integral_z;
@@ -741,4 +627,10 @@ void printDebugData() {
   Serial.print(sensorData.accel_x, 4); Serial.print(",");
   Serial.print(sensorData.accel_y, 4); Serial.print(",");
   Serial.println(sensorData.accel_z, 4);
+}
+
+float randomFloat(float minValue, float maxValue) {
+  long scaled = random(0, 1000000L);
+  float fraction = scaled / 1000000.0f;
+  return minValue + (maxValue - minValue) * fraction;
 }
