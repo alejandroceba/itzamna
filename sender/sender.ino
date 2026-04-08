@@ -28,7 +28,7 @@
 // ============================================================================
 #define WIFI_CHANNEL 6
 //uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
-uint8_t senderMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // Sender MAC address
+uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // Sender MAC address
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
