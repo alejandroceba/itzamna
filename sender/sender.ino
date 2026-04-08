@@ -27,8 +27,8 @@
 // ESP-NOW & WIFI CONFIGURATION
 // ============================================================================
 #define WIFI_CHANNEL 6
-uint8_t receiverMAC[] = {0x98, 0xa3, 0x16, 0xf8, 0x1c, 0x70};  // Receiver MAC address
-
+//uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
+uint8_t senderMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // Sender MAC address
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
@@ -50,7 +50,7 @@ uint8_t receiverMAC[] = {0x98, 0xa3, 0x16, 0xf8, 0x1c, 0x70};  // Receiver MAC a
 // ============================================================================
 #define ACCEL_SENSITIVITY_THRESHOLD 0.3  // m/s² - threshold for velocity reset
 #define ACCEL_SCALE 16384.0              // ±2g sensitivity scale factor
-#define MUESTRAS_BIAS 1500                // Number of samples for bias calibration
+#define MUESTRAS_BIAS 2000                // Number of samples for bias calibration
 
 
 // Sampling rates
