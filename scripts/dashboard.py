@@ -86,7 +86,7 @@ SERIAL_IMG_FRAME_END = 3
 SERIAL_IMG_MAX_PAYLOAD = 240
 
 # ---------- USER CONFIG ----------
-SERIAL_PORT = None       # Example: "/dev/ttyACM0". Keep None for auto-detect.
+SERIAL_PORT = "/dev/ttyACM0"
 BAUD = 460_800
 MAX_POINTS = 120
 SENSOR_TIMEOUT_SEC = 2.5
@@ -155,6 +155,11 @@ def open_serial_with_fallback(port_name: str, baud: int) -> serial.Serial:
         return serial.Serial(port_name, baud, timeout=0.02)
     except Exception as first_exc:
         print(f"Primary port failed ({port_name}): {first_exc}")
+
+    # If the user set an explicit port, fail fast to avoid attaching to
+    # the wrong board silently.
+    if SERIAL_PORT:
+        raise RuntimeError(f"Could not open configured SERIAL_PORT {port_name}: {first_exc}")
 
     # Try other candidates if auto-selection picked a bad device.
     for c in list_candidate_ports():

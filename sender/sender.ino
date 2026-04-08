@@ -60,7 +60,7 @@ const unsigned long SEND_INTERVAL_MS = 1000.0;    // 1 Hz ESP-NOW transmission r
 // Image forwarding modes:
 // 0 = conservative (higher telemetry protection, higher image latency)
 // 1 = faster (lower image latency, still bounded by per-loop budget)
-#define IMG_FORWARD_MODE 0
+#define IMG_FORWARD_MODE 1
 
 const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_SAFE = 1;
 const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 4;
