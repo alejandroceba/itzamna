@@ -210,7 +210,6 @@ bool dequeueImagePacket(ImageForwardItem &out);
 bool isValidImagePacket(const uint8_t *data, int len);
 bool isSameMac(const uint8_t *a, const uint8_t *b);
 void copyMac(uint8_t *dst, const uint8_t *src);
-float randomFloat(float minValue, float maxValue);
 
 // ============================================================================
 // SETUP - Initialize All Subsystems
@@ -483,31 +482,83 @@ void processImageForwarding(unsigned long now) {
 // SENSOR INITIALIZATION
 // ============================================================================
 void initializeSensors() {
-  randomSeed(esp_random());
-  Serial.println("Mock sensor data enabled\n");
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  if (bmi.softReset() != BMI160_OK) {
+    if (DEBUG) Serial.println("ERROR: BMI160 soft reset failed");
+  }
+
+  if (bmi.I2cInit(BMI160_I2C_ADDR) != BMI160_OK) {
+    if (DEBUG) Serial.println("ERROR: BMI160 I2C init failed");
+  } else if (DEBUG) {
+    Serial.println("BMI160 initialized");
+  }
+
+  SPI.begin(BME_SCK, BME_MISO, BME_MOSI, BME_CS);
+  pinMode(BME_CS, OUTPUT);
+  digitalWrite(BME_CS, HIGH);
+
+  if (!bme.begin(BME_CS)) {
+    if (DEBUG) Serial.println("ERROR: BME280 initialization failed");
+  } else if (DEBUG) {
+    Serial.println("BME280 initialized");
+  }
+
+  ds18b20.begin();
+  if (DEBUG) Serial.println("DS18B20 initialized");
 }
 
 // ============================================================================
 // ACCELEROMETER BIAS CALIBRATION
 // ============================================================================
 void calibrateAccelerometer() {
-  bias_accel_x = 0.0;
-  bias_accel_y = 0.0;
-  bias_accel_z = 0.0;
+  if (DEBUG) Serial.println("Calibrating accelerometer bias... keep sensor still");
+
+  bias_accel_x = 0.0f;
+  bias_accel_y = 0.0f;
+  bias_accel_z = 0.0f;
+
+  for (int i = 0; i < MUESTRAS_BIAS; i++) {
+    if (bmi.getAccelGyroData(rawSensorData) == BMI160_OK) {
+      bias_accel_x += (float)rawSensorData[3] / ACCEL_SCALE;
+      bias_accel_y += (float)rawSensorData[4] / ACCEL_SCALE;
+      bias_accel_z += (float)rawSensorData[5] / ACCEL_SCALE;
+    }
+    delay(5);
+  }
+
+  bias_accel_x /= (float)MUESTRAS_BIAS;
+  bias_accel_y /= (float)MUESTRAS_BIAS;
+  bias_accel_z /= (float)MUESTRAS_BIAS;
+
+  if (DEBUG) {
+    Serial.printf("Accel bias: %.6f, %.6f, %.6f g\n", bias_accel_x, bias_accel_y, bias_accel_z);
+  }
 }
 
 // ============================================================================
 // READ ALL SENSORS AT 100 Hz
 // ============================================================================
 void readAllSensors() {
-  sensorData.temperature_bme280 = randomFloat(18.0f, 32.0f);
-  sensorData.temperature_ds18b20 = randomFloat(18.0f, 32.0f);
-  sensorData.pressure_hpa = randomFloat(920.0f, 1040.0f);
-  sensorData.altitude_m = randomFloat(0.0f, 2500.0f);
+  sensorData.temperature_bme280 = bme.readTemperature();
+  sensorData.pressure_hpa = (bme.readPressure() / 100.0f) - 74.0f;
+  sensorData.altitude_m = bme.readAltitude(1013.25f);
 
-  current_accel_x = randomFloat(-2.0f, 2.0f);
-  current_accel_y = randomFloat(-2.0f, 2.0f);
-  current_accel_z = randomFloat(-2.0f, 2.0f);
+  ds18b20.requestTemperatures();
+  sensorData.temperature_ds18b20 = ds18b20.getTempCByIndex(0);
+
+  if (bmi.getAccelGyroData(rawSensorData) == BMI160_OK) {
+    current_accel_x = ((float)rawSensorData[3] / ACCEL_SCALE) * 9.81f;
+    current_accel_y = ((float)rawSensorData[4] / ACCEL_SCALE) * 9.81f;
+    current_accel_z = ((float)rawSensorData[5] / ACCEL_SCALE) * 9.81f;
+
+    current_accel_x -= bias_accel_x * 9.81f;
+    current_accel_y -= bias_accel_y * 9.81f;
+    current_accel_z -= bias_accel_z * 9.81f;
+
+    // Remove gravity assuming sensor Z axis is vertical.
+    current_accel_z -= 9.81f;
+  }
 
   sensorData.accel_x = current_accel_x;
   sensorData.accel_y = current_accel_y;
@@ -518,10 +569,22 @@ void readAllSensors() {
 // INTEGRATE ACCELERATION TO VELOCITY
 // ============================================================================
 void integrateVelocity() {
-  const float dt = 0.01f;
+  unsigned long now = millis();
+  float dt = (now - lastIntegrationTime) / 1000.0f;
+  if (dt <= 0.0f) dt = 0.01f;
+  lastIntegrationTime = now;
+
   velocity_integral_x += current_accel_x * dt;
   velocity_integral_y += current_accel_y * dt;
   velocity_integral_z += current_accel_z * dt;
+
+  if (fabsf(current_accel_x) < ACCEL_SENSITIVITY_THRESHOLD &&
+      fabsf(current_accel_y) < ACCEL_SENSITIVITY_THRESHOLD &&
+      fabsf(current_accel_z) < ACCEL_SENSITIVITY_THRESHOLD) {
+    velocity_integral_x = 0.0f;
+    velocity_integral_y = 0.0f;
+    velocity_integral_z = 0.0f;
+  }
 
   sensorData.velocity_x = velocity_integral_x;
   sensorData.velocity_y = velocity_integral_y;
@@ -629,8 +692,3 @@ void printDebugData() {
   Serial.println(sensorData.accel_z, 4);
 }
 
-float randomFloat(float minValue, float maxValue) {
-  long scaled = random(0, 1000000L);
-  float fraction = scaled / 1000000.0f;
-  return minValue + (maxValue - minValue) * fraction;
-}
