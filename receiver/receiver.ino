@@ -8,7 +8,7 @@
 #define WIFI_CHANNEL 6
 #define SERIAL_BAUD 460800
 #define DEBUG 0
-#define IMG_DEBUG 0
+#define IMG_DEBUG 1
 #define STATUS_PRINT_ENABLE 0
 
 // 1 = full-rate sensor CSV print; increase to throttle printing if needed at high packet rates.
@@ -24,8 +24,9 @@ static const uint16_t IMG_MAX_CHUNK_PAYLOAD = 200;
 static const uint32_t IMG_MAX_IMAGE_BYTES = 300000;   // supports QVGA RGB anaglyph payloads
 static const uint16_t IMG_SERIAL_CHUNK_BYTES = 64;    // smaller lines are more robust over USB CDC serial
 static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 6; // extra pacing reduces host-side parser overruns
-static const uint8_t IMG_SERIAL_CHUNK_DUPLICATES = 2;  // transmit each chunk multiple times for redundancy
-static const uint8_t IMG_SERIAL_BEGIN_REPEATS = 2;     // repeat begin frame to improve host lock-on
+static const uint8_t IMG_SERIAL_CHUNK_DUPLICATES = 1;  // one line per chunk keeps logs readable while preserving sequence debug
+static const uint8_t IMG_SERIAL_BEGIN_REPEATS = 1;     // one begin line is enough with current parser/transport
+static const uint16_t IMG_SERIAL_CHUNK_LINE_STRIDE = 1; // test mode: emit every chunk line so dashboard can fully reconstruct image
 static const uint8_t SERIAL_IMG_SOF1 = 0xA5;
 static const uint8_t SERIAL_IMG_SOF2 = 0x5A;
 static const uint8_t SERIAL_IMG_FRAME_BEGIN = 1;
@@ -322,32 +323,30 @@ void emitImageFrame(uint8_t frameType, const uint8_t *payload, uint16_t payloadL
 }
 
 void emitBeginFrame(uint16_t imageId, uint16_t width, uint16_t height, uint32_t dataLen) {
-  uint8_t payload[10];
-  memcpy(&payload[0], &imageId, sizeof(imageId));
-  memcpy(&payload[2], &width, sizeof(width));
-  memcpy(&payload[4], &height, sizeof(height));
-  memcpy(&payload[6], &dataLen, sizeof(dataLen));
-  emitImageFrame(SERIAL_IMG_FRAME_BEGIN, payload, sizeof(payload));
+  Serial.printf("IMG_BEGIN %u %u %u %lu\n",
+                (unsigned)imageId,
+                (unsigned)width,
+                (unsigned)height,
+                (unsigned long)dataLen);
 }
 
 void emitChunkFrame(uint16_t imageId, uint16_t chunkIndex, uint16_t n, const uint8_t *data) {
-  uint8_t payload[6 + IMG_SERIAL_CHUNK_BYTES];
-  memcpy(&payload[0], &imageId, sizeof(imageId));
-  memcpy(&payload[2], &chunkIndex, sizeof(chunkIndex));
-  memcpy(&payload[4], &n, sizeof(n));
+  Serial.printf("IMG_CHUNK %u %u %u ",
+                (unsigned)imageId,
+                (unsigned)chunkIndex,
+                (unsigned)n);
   if (n > 0 && data != nullptr) {
-    memcpy(&payload[6], data, n);
+    printHexPayload(data, n);
   }
-  emitImageFrame(SERIAL_IMG_FRAME_CHUNK, payload, (uint16_t)(6 + n));
+  Serial.write('\n');
 }
 
 void emitEndFrame(uint16_t imageId, uint8_t ok, uint16_t chunks, uint32_t bytesCount) {
-  uint8_t payload[9];
-  memcpy(&payload[0], &imageId, sizeof(imageId));
-  payload[2] = ok;
-  memcpy(&payload[3], &chunks, sizeof(chunks));
-  memcpy(&payload[5], &bytesCount, sizeof(bytesCount));
-  emitImageFrame(SERIAL_IMG_FRAME_END, payload, sizeof(payload));
+  Serial.printf("IMG_END %u %u %u %lu\n",
+                (unsigned)imageId,
+                (unsigned)ok,
+                (unsigned)chunks,
+                (unsigned long)bytesCount);
 }
 
 bool ensureImagePeerRegistered() {
@@ -443,7 +442,10 @@ void handleImagePacket(const uint8_t *data, int len) {
     }
 
     freeImageBufferIfAny();
-    g_imgBuffer = (uint8_t *)malloc(b.dataLen);
+    g_imgBuffer = (uint8_t *)ps_malloc(b.dataLen);
+    if (!g_imgBuffer) {
+      g_imgBuffer = (uint8_t *)malloc(b.dataLen);
+    }
     if (!g_imgBuffer) {
       g_imgBadPackets++;
           IMG_DBG("IMG_DBG malloc_fail bytes=%lu free_heap=%u\n",
@@ -623,7 +625,21 @@ void OnReceive(const esp_now_recv_info_t *info, const uint8_t *incomingData, int
 
   const uint8_t *src = info->src_addr;
   uint8_t pktType = incomingData[0];
-  bool looksLikeImage = (pktType == PKT_BEGIN || pktType == PKT_CHUNK || pktType == PKT_END);
+  bool looksLikeImage = false;
+
+  // Route by packet shape first to avoid confusing sensor payload bytes with
+  // image packet types.
+  if (pktType == PKT_BEGIN && len == (int)sizeof(BeginPacket)) {
+    BeginPacket b;
+    memcpy(&b, incomingData, sizeof(BeginPacket));
+    looksLikeImage = (b.magic == PACKET_MAGIC);
+  } else if (pktType == PKT_END && len == (int)sizeof(EndPacket)) {
+    looksLikeImage = true;
+  } else if (pktType == PKT_CHUNK && len >= 7 && len <= (7 + (int)IMG_MAX_CHUNK_PAYLOAD)) {
+    uint16_t n = 0;
+    memcpy(&n, &incomingData[5], sizeof(n));
+    looksLikeImage = (n > 0 && n <= IMG_MAX_CHUNK_PAYLOAD && (7 + (int)n) == len);
+  }
 
   portENTER_CRITICAL_ISR(&g_mux);
 
@@ -690,6 +706,10 @@ void OnReceive(const esp_now_recv_info_t *info, const uint8_t *incomingData, int
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(500);
+
+  Serial.printf("RECEIVER_MEM psram=%s free_heap=%u\n",
+                psramFound() ? "yes" : "no",
+                (unsigned)ESP.getFreeHeap());
 
   WiFi.mode(WIFI_STA);
 
@@ -912,8 +932,15 @@ void loop() {
         n = (uint16_t)(total - offset);
       }
 
-      for (uint8_t dup = 0; dup < IMG_SERIAL_CHUNK_DUPLICATES; dup++) {
-        emitChunkFrame(id, chunkIndex, n, g_imgBuffer + offset);
+      bool isLastChunk = (offset + n) >= total;
+      bool shouldEmitChunkLine = (IMG_SERIAL_CHUNK_LINE_STRIDE <= 1) ||
+                                 ((chunkIndex % IMG_SERIAL_CHUNK_LINE_STRIDE) == 0) ||
+                                 isLastChunk;
+
+      if (shouldEmitChunkLine) {
+        for (uint8_t dup = 0; dup < IMG_SERIAL_CHUNK_DUPLICATES; dup++) {
+          emitChunkFrame(id, chunkIndex, n, g_imgBuffer + offset);
+        }
       }
       nextChunkEmitMs = millis() + IMG_SERIAL_CHUNK_INTERVAL_MS;
 

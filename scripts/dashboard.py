@@ -96,6 +96,7 @@ DATA_DIR = (Path(__file__).resolve().parent.parent / "data")
 SENSOR_LOG_PATH = DATA_DIR / "telemetry_merged.csv"
 IMAGE_DIR = DATA_DIR
 DEBUG_LOG_PATH = DATA_DIR / "image_debug.log"
+RAW_SERIAL_LOG_PATH = DATA_DIR / "receiver_serial_raw.log"
 
 
 @dataclass
@@ -215,11 +216,17 @@ if need_header:
     sensor_log_file.flush()
 
 debug_log_file = open(DEBUG_LOG_PATH, "a", newline="")
+raw_serial_log_file = open(RAW_SERIAL_LOG_PATH, "a", newline="")
 
 
 def dbg(msg: str) -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     debug_log_file.write(f"{stamp} {msg}\n")
+
+
+def log_raw_serial_line(line: str) -> None:
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    raw_serial_log_file.write(f"{stamp} {line}\n")
 
 
 time_buffer = deque([""] * MAX_POINTS, maxlen=MAX_POINTS)
@@ -691,6 +698,7 @@ def process_serial_buffer() -> bool:
             del serial_parse_buffer[: nl_idx + 1]
             line = raw.decode("utf-8", errors="ignore").strip()
             if line:
+                log_raw_serial_line(line)
                 sensor_updated = process_text_line(line) or sensor_updated
             processed_events += 1
             continue
@@ -713,6 +721,7 @@ def process_serial_buffer() -> bool:
                 del serial_parse_buffer[: nl_idx + 1]
                 line = raw.decode("utf-8", errors="ignore").strip()
                 if line:
+                    log_raw_serial_line(line)
                     sensor_updated = process_text_line(line) or sensor_updated
                 processed_events += 1
                 continue
@@ -834,6 +843,7 @@ def update_plot(_frame: int):
     if now_mono - last_file_flush_mono >= 0.5:
         sensor_log_file.flush()
         debug_log_file.flush()
+        raw_serial_log_file.flush()
         last_file_flush_mono = now_mono
 
     if current_image is not None and current_image_last_activity_mono > 0.0:
@@ -904,6 +914,12 @@ except Exception:
 try:
     debug_log_file.flush()
     debug_log_file.close()
+except Exception:
+    pass
+
+try:
+    raw_serial_log_file.flush()
+    raw_serial_log_file.close()
 except Exception:
     pass
 
