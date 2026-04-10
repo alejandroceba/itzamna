@@ -40,10 +40,11 @@ uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // Sender MAC a
 #define SCL_PIN 6
 #define BMI160_I2C_ADDR 0x68
 // BME280 (SPI barometric/temperature sensor)
-#define BME_CS 2
-#define BME_SCK 7
-#define BME_MOSI 9
-#define BME_MISO 8
+#define BME280_I2C_ADDR 0x76
+//#define BME_CS 2
+//#define BME_SCK 7
+//#define BME_MOSI 9
+//#define BME_MISO 8
 
 // ============================================================================
 // SENSOR TIMING & PARAMETERS
@@ -70,7 +71,7 @@ const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 3;
 // ============================================================================
 // SENSOR OBJECT INSTANTIATION
 // ============================================================================
-Adafruit_BME280 bme(BME_CS, BME_MOSI, BME_MISO, BME_SCK);  // SPI mode
+Adafruit_BME280 bme;  // SPI mode
 OneWire oneWire(DS18_PIN);
 DallasTemperature ds18b20(&oneWire);
 DFRobot_BMI160 bmi;
@@ -494,15 +495,24 @@ void initializeSensors() {
     Serial.println("BMI160 initialized");
   }
 
-  SPI.begin(BME_SCK, BME_MISO, BME_MOSI, BME_CS);
-  pinMode(BME_CS, OUTPUT);
-  digitalWrite(BME_CS, HIGH);
+  //SPI.begin(BME_SCK, BME_MISO, BME_MOSI, BME_CS);
+  //pinMode(BME_CS, OUTPUT);
+  //digitalWrite(BME_CS, HIGH);
 
-  if (!bme.begin(BME_CS)) {
-    if (DEBUG) Serial.println("ERROR: BME280 initialization failed");
-  } else if (DEBUG) {
-    Serial.println("BME280 initialized");
+  //if (!bme.begin(BME_CS)) {
+  //  if (DEBUG) Serial.println("ERROR: BME280 initialization failed");
+  //} else if (DEBUG) {
+  //  Serial.println("BME280 initialized");
+  //}
+
+  bool status;
+
+  status = bme.begin(BME280_I2C_ADDR);
+  if (!status) {
+    Serial.println("ERROR: BME280 initialization failed");
+    while (1);
   }
+  Serial.println("BME280 initialized");
 
   ds18b20.begin();
   if (DEBUG) Serial.println("DS18B20 initialized");
