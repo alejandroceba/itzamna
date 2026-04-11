@@ -397,11 +397,25 @@ bool isValidImagePacket(const uint8_t *data, int len) {
     if (len != (int)sizeof(BeginPacket)) return false;
     BeginPacket begin{};
     memcpy(&begin, data, sizeof(BeginPacket));
-    return begin.magic == PACKET_MAGIC;
+
+    if (begin.magic != PACKET_MAGIC) return false;
+    if (begin.width == 0 || begin.height == 0) return false;
+    if (begin.chunkPayload == 0 || begin.chunkPayload > (ESPNOW_MAX_PAYLOAD - 7)) return false;
+
+    uint32_t pixels = (uint32_t)begin.width * (uint32_t)begin.height;
+    uint32_t expectedRgb565 = pixels * 2UL;
+    uint32_t expectedRgb888 = pixels * 3UL;
+    if (begin.dataLen != expectedRgb565 && begin.dataLen != expectedRgb888) return false;
+
+    return true;
   }
 
   if (type == PKT_CHUNK) {
-    return len >= 7;
+    if (len < 7) return false;
+
+    uint16_t n = (uint16_t)data[5] | ((uint16_t)data[6] << 8);
+    if (n == 0 || n > (ESPNOW_MAX_PAYLOAD - 7)) return false;
+    return len == (int)(7 + n);
   }
 
   if (type == PKT_END) {

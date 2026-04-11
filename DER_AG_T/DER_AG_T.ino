@@ -8,8 +8,7 @@
 static const int BTN_PIN = D2;
 static const int TX_PIN  = D6;
 static const int RX_PIN  = D7;
-//static const uint32_t BAUD = 921600;
-static const uint32_t BAUD = 115200;
+static const uint32_t BAUD = 921600;
 static const uint8_t WIFI_CHANNEL = 6;
 
 // Receiver image protocol (forwarded by sender.ino)
@@ -37,7 +36,7 @@ static const uint8_t ACK_CHUNK_BYTE = 0x43; // 'C'
 static const uint8_t ACK_FINAL_BYTE = 0x06; // ACK
 static const uint8_t ERR_BYTE       = 0x15; // NAK
 
-static const uint16_t CHUNK_SIZE = 128;
+static const uint16_t CHUNK_SIZE = 256;
 
 struct __attribute__((packed)) BeginPacket {
   uint8_t type;
@@ -95,6 +94,23 @@ static uint32_t read_u32_le(const uint8_t *p) {
        | ((uint32_t)p[3] << 24);
 }
 
+bool readExact(uint8_t *dst, size_t n, uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  size_t got = 0;
+
+  while (got < n && (millis() - t0) < timeoutMs) {
+    int a = Link.available();
+    if (a > 0) {
+      size_t take = min((size_t)a, n - got);
+      got += Link.readBytes((char*)dst + got, take);
+      t0 = millis();
+    } else {
+      delay(1);
+    }
+  }
+  return got == n;
+}
+
 // ================= CONVERSIÓN A GRIS =================
 uint8_t rgb565ToGray(uint16_t p) {
   uint8_t r = ((p >> 11) & 0x1F) * 255 / 31;
@@ -102,6 +118,13 @@ uint8_t rgb565ToGray(uint16_t p) {
   uint8_t b = ( p        & 0x1F) * 255 / 31;
 
   return (uint8_t)(0.299f * r + 0.587f * g + 0.114f * b);
+}
+
+static inline uint16_t packAnaglyphRGB565(uint8_t leftGray, uint8_t rightGray) {
+  uint16_t r = ((uint16_t)(leftGray  >> 3) & 0x1F) << 11;
+  uint16_t g = ((uint16_t)(rightGray >> 2) & 0x3F) << 5;
+  uint16_t b = ((uint16_t)(rightGray >> 3) & 0x1F);
+  return (uint16_t)(r | g | b);
 }
 
 // ================= CÁMARA =================
@@ -283,6 +306,133 @@ bool sendImageEnd(uint16_t imageId, uint16_t totalChunks, uint32_t dataLen) {
   return sendEspNowPacket((const uint8_t *)&e, sizeof(e));
 }
 
+bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
+  if (!fb || !outGray) return false;
+
+  uint32_t expectedLen = (uint32_t)fb->width * fb->height * 2;
+  if (fb->len != expectedLen) {
+    Serial.printf("[DER] len inesperado en derecha: len=%u esperado=%u\n",
+                  (unsigned)fb->len, (unsigned)expectedLen);
+    return false;
+  }
+
+  uint32_t totalPixels = (uint32_t)fb->width * fb->height;
+  uint8_t *gray = (uint8_t*)malloc(totalPixels);
+  if (!gray) {
+    Serial.println("[DER] No se pudo reservar rightGray");
+    return false;
+  }
+
+  uint32_t px = 0;
+  for (uint32_t i = 0; i < fb->len; i += 2) {
+    uint16_t p = ((uint16_t)fb->buf[i] << 8) | fb->buf[i + 1];
+    gray[px++] = rgb565ToGray(p);
+  }
+
+  *outGray = gray;
+  return true;
+}
+
+bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
+                                    uint16_t width,
+                                    uint16_t height,
+                                    uint32_t totalLen,
+                                    const uint8_t *rightGray) {
+  uint32_t expectedLen = (uint32_t)width * height * 2;
+  if (totalLen != expectedLen) {
+    Serial.printf("[DER] len no coincide con width/height: len=%u esperado=%u\n",
+                  (unsigned)totalLen, (unsigned)expectedLen);
+    return false;
+  }
+
+  bool espOk = true;
+  if (!sendImageBegin(imageId, width, height, expectedLen)) {
+    Serial.println("[DER] No se pudo enviar PKT_BEGIN de anaglifo");
+    espOk = false;
+  }
+
+  Link.write(ACK_HDR_BYTE);
+  Link.flush();
+
+  uint32_t received = 0;
+  uint32_t pixelIndex = 0;
+  uint8_t imgPayload[IMAGE_CHUNK_PAYLOAD];
+  uint16_t imgPayloadLen = 0;
+  uint16_t chunkIndex = 0;
+  uint32_t sentAnaglyphBytes = 0;
+
+  while (received < totalLen) {
+    uint8_t lenBuf[2];
+    if (!readExact(lenBuf, 2, 4000)) {
+      Serial.println("[DER] Timeout leyendo tamaño de bloque");
+      return false;
+    }
+
+    uint16_t n = read_u16_le(lenBuf);
+    if (n == 0 || n > CHUNK_SIZE || (received + n) > totalLen) {
+      Serial.printf("[DER] Bloque inválido: %u\n", n);
+      return false;
+    }
+
+    if (n % 2 != 0) {
+      Serial.println("[DER] Bloque RGB565 impar");
+      return false;
+    }
+
+    uint8_t buf[CHUNK_SIZE];
+    if (!readExact(buf, n, 4000)) {
+      Serial.println("[DER] Timeout leyendo bloque");
+      return false;
+    }
+
+    for (uint16_t i = 0; i < n; i += 2) {
+      uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
+      uint8_t leftGray = rgb565ToGray(p);
+      uint8_t rightG = rightGray[pixelIndex++];
+      uint16_t anaPix = packAnaglyphRGB565(leftGray, rightG);
+
+      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 2)) {
+        if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
+          espOk = false;
+        }
+        sentAnaglyphBytes += imgPayloadLen;
+        chunkIndex++;
+        imgPayloadLen = 0;
+      }
+
+      imgPayload[imgPayloadLen++] = (uint8_t)((anaPix >> 8) & 0xFF);
+      imgPayload[imgPayloadLen++] = (uint8_t)(anaPix & 0xFF);
+    }
+
+    received += n;
+    Link.write(ACK_CHUNK_BYTE);
+    Link.flush();
+  }
+
+  if (imgPayloadLen > 0) {
+    if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
+      espOk = false;
+    }
+    sentAnaglyphBytes += imgPayloadLen;
+    chunkIndex++;
+  }
+
+  if (sentAnaglyphBytes != expectedLen) {
+    Serial.printf("[DER] Mismatch bytes anaglifo: enviados=%lu esperados=%lu\n",
+                  (unsigned long)sentAnaglyphBytes,
+                  (unsigned long)expectedLen);
+    return false;
+  }
+
+  if (espOk) {
+    if (!sendImageEnd(imageId, chunkIndex, expectedLen)) {
+      espOk = false;
+    }
+  }
+
+  return espOk;
+}
+
 bool sendPhotoFrame(uint16_t imageId, camera_fb_t *fb) {
   if (!fb) return false;
 
@@ -293,57 +443,57 @@ bool sendPhotoFrame(uint16_t imageId, camera_fb_t *fb) {
     return false;
   }
 
-  uint32_t photoLen = (uint32_t)fb->width * fb->height * 3;
-  if (!sendImageBegin(imageId, fb->width, fb->height, photoLen)) {
-    Serial.println("[DER] No se pudo enviar PKT_BEGIN de foto");
+  uint32_t anaglyphLen = (uint32_t)fb->width * fb->height * 2;
+  if (!sendImageBegin(imageId, fb->width, fb->height, anaglyphLen)) {
+    Serial.println("[DER] No se pudo enviar PKT_BEGIN de anaglifo");
     return false;
   }
 
   uint8_t imgPayload[IMAGE_CHUNK_PAYLOAD];
   uint16_t imgPayloadLen = 0;
   uint16_t chunkIndex = 0;
-  uint32_t sentPhotoBytes = 0;
+  uint32_t sentAnaglyphBytes = 0;
 
   for (uint32_t i = 0; i < fb->len; i += 2) {
     uint16_t p = ((uint16_t)fb->buf[i] << 8) | fb->buf[i + 1];
 
-    uint8_t r = (uint8_t)(((p >> 11) & 0x1F) * 255 / 31);
-    uint8_t g = (uint8_t)(((p >> 5) & 0x3F) * 255 / 63);
-    uint8_t b = (uint8_t)((p & 0x1F) * 255 / 31);
+    uint8_t gray = rgb565ToGray(p);
+    uint16_t anaPix = packAnaglyphRGB565(gray, gray);
+    uint8_t anaHi = (uint8_t)((anaPix >> 8) & 0xFF);
+    uint8_t anaLo = (uint8_t)(anaPix & 0xFF);
 
-    if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 3)) {
+    if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 2)) {
       if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
-        Serial.println("[DER] No se pudo enviar PKT_CHUNK de foto");
+        Serial.println("[DER] No se pudo enviar PKT_CHUNK de anaglifo");
         return false;
       }
-      sentPhotoBytes += imgPayloadLen;
+      sentAnaglyphBytes += imgPayloadLen;
       chunkIndex++;
       imgPayloadLen = 0;
     }
 
-    imgPayload[imgPayloadLen++] = r;
-    imgPayload[imgPayloadLen++] = g;
-    imgPayload[imgPayloadLen++] = b;
+    imgPayload[imgPayloadLen++] = anaHi;
+    imgPayload[imgPayloadLen++] = anaLo;
   }
 
   if (imgPayloadLen > 0) {
     if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
-      Serial.println("[DER] No se pudo enviar ultimo PKT_CHUNK de foto");
+      Serial.println("[DER] No se pudo enviar ultimo PKT_CHUNK de anaglifo");
       return false;
     }
-    sentPhotoBytes += imgPayloadLen;
+    sentAnaglyphBytes += imgPayloadLen;
     chunkIndex++;
   }
 
-  if (sentPhotoBytes != photoLen) {
-    Serial.printf("[DER] Mismatch bytes foto: enviados=%lu esperados=%lu\n",
-                  (unsigned long)sentPhotoBytes,
-                  (unsigned long)photoLen);
+  if (sentAnaglyphBytes != anaglyphLen) {
+    Serial.printf("[DER] Mismatch bytes anaglifo: enviados=%lu esperados=%lu\n",
+                  (unsigned long)sentAnaglyphBytes,
+                  (unsigned long)anaglyphLen);
     return false;
   }
 
-  if (!sendImageEnd(imageId, chunkIndex, photoLen)) {
-    Serial.println("[DER] No se pudo enviar PKT_END de foto");
+  if (!sendImageEnd(imageId, chunkIndex, anaglyphLen)) {
+    Serial.println("[DER] No se pudo enviar PKT_END de anaglifo");
     return false;
   }
 
@@ -591,6 +741,8 @@ void setup() {
   Serial.printf("[DER] PROTO %s\n", PROTO_VERSION);
 
   pinMode(BTN_PIN, INPUT_PULLUP);
+  Link.setRxBufferSize(4096);
+  Link.begin(BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
 
   if (!initCamera()) {
     Serial.println("Error al iniciar cámara derecha");
@@ -611,6 +763,7 @@ void loop() {
   if (!buttonPressed()) return;
 
   g_busy = true;
+  while (Link.available()) Link.read();
 
   uint32_t tStart = millis();
   uint16_t imageId = g_imageId++;
@@ -628,17 +781,75 @@ void loop() {
   Serial.printf("[DER] width=%u height=%u len=%u format=%u\n",
                 fb->width, fb->height, fb->len, fb->format);
 
-  if (!sendPhotoFrame(imageId, fb)) {
-    Serial.println("[DER] Error enviando foto por ESP-NOW");
+  uint8_t *rightGray = nullptr;
+  if (!buildGrayBufferFromFrame(fb, &rightGray)) {
+    Serial.println("[DER] Error construyendo rightGray");
     esp_camera_fb_return(fb);
     waitButtonRelease();
     g_busy = false;
     return;
   }
 
+  uint16_t rightW = fb->width;
+  uint16_t rightH = fb->height;
+
   esp_camera_fb_return(fb);
 
-  Serial.printf("[DER] Foto enviada por ESP-NOW, imageId=%u\n", imageId);
+  Link.write(READY_BYTE);
+  Link.flush();
+  Serial.println("[DER] READY enviado, esperando header...");
+
+  uint8_t hdr[10];
+  if (!readExact(hdr, sizeof(hdr), 8000)) {
+    Serial.println("[DER] Timeout leyendo header");
+    free(rightGray);
+    Link.write(ERR_BYTE);
+    waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  uint16_t magic    = read_u16_le(&hdr[0]);
+  uint16_t leftW    = read_u16_le(&hdr[2]);
+  uint16_t leftH    = read_u16_le(&hdr[4]);
+  uint32_t totalLen = read_u32_le(&hdr[6]);
+
+  if (magic != MAGIC) {
+    Serial.printf("[DER] BAD MAGIC 0x%04X\n", magic);
+    free(rightGray);
+    Link.write(ERR_BYTE);
+    waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  Serial.printf("[DER] Header recibido: w=%u h=%u len=%u\n",
+                leftW, leftH, (unsigned)totalLen);
+
+  if (leftW != rightW || leftH != rightH) {
+    Serial.println("[DER] Dimensiones izquierda/derecha no coinciden");
+    free(rightGray);
+    Link.write(ERR_BYTE);
+    waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  if (!receiveLeftAndSendAnaglyphUART(imageId, leftW, leftH, totalLen, rightGray)) {
+    Serial.println("[DER] Error generando/enviando anaglifo por ESP-NOW");
+    free(rightGray);
+    Link.write(ERR_BYTE);
+    waitButtonRelease();
+    g_busy = false;
+    return;
+  }
+
+  free(rightGray);
+
+  Link.write(ACK_FINAL_BYTE);
+  Link.flush();
+
+  Serial.printf("[DER] Anaglifo enviado por ESP-NOW, imageId=%u\n", imageId);
 
   uint32_t elapsed = millis() - tStart;
   Serial.printf("[DER] Tiempo total: %lu ms (%.2f s)\n",
