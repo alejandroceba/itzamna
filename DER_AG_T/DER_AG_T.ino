@@ -17,7 +17,8 @@ static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
 static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
-static const uint8_t IMAGE_SEND_GAP_MS = 15;
+static const uint8_t IMAGE_SEND_GAP_MS = 4;
+static const uint8_t IMAGE_SEND_MAX_RETRIES = 12;
 
 // TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
 // and replace SENDER_MAC with the real unicast target.
@@ -176,7 +177,7 @@ bool initCamera() {
   c.xclk_freq_hz = 10000000;
   c.pixel_format = PIXFORMAT_RGB565;
 
-  c.frame_size   = FRAMESIZE_QVGA;
+  c.frame_size   = FRAMESIZE_QQVGA;
   c.jpeg_quality = 20;
   c.fb_count     = 1;
 
@@ -184,7 +185,7 @@ bool initCamera() {
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-    c.frame_size   = FRAMESIZE_QVGA;
+    c.frame_size   = FRAMESIZE_QQVGA;
     c.fb_location  = CAMERA_FB_IN_DRAM;
   }
 
@@ -247,13 +248,18 @@ bool sendEspNowPacket(const uint8_t *data, size_t len) {
   if (!data || len == 0 || len > 250) return false;
 
   esp_err_t err = ESP_FAIL;
-  for (uint8_t attempt = 0; attempt < 5; attempt++) {
+  for (uint8_t attempt = 0; attempt < IMAGE_SEND_MAX_RETRIES; attempt++) {
     err = esp_now_send(g_senderPeerAddr, data, len);
     if (err == ESP_OK) {
       break;
     }
 
-    delay((attempt + 1) * 3);
+    // 12391 = ESP_ERR_ESPNOW_NO_MEM. Give the MAC queue extra time to drain.
+    uint16_t backoffMs = (uint16_t)(2 + (attempt * 3));
+    if (err == ESP_ERR_ESPNOW_NO_MEM) {
+      backoffMs = (uint16_t)(backoffMs + 8 + IMAGE_SEND_GAP_MS);
+    }
+    delay(backoffMs);
     yield();
   }
 
@@ -343,7 +349,7 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     return false;
   }
 
-  uint32_t anaglyphLen = (uint32_t)width * height * 3;
+  uint32_t anaglyphLen = (uint32_t)width * height * 2;
 
   bool espOk = true;
   if (!sendImageBegin(imageId, width, height, anaglyphLen)) {
@@ -389,11 +395,9 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
       uint8_t rightG = rightGray[pixelIndex++];
-      uint8_t anaR = leftGray;
-      uint8_t anaG = rightG;
-      uint8_t anaB = rightG;
+      uint16_t anaPix = packAnaglyphRGB565(leftGray, rightG);
 
-      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 3)) {
+      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 2)) {
         if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
           espOk = false;
         }
@@ -402,9 +406,8 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
         imgPayloadLen = 0;
       }
 
-      imgPayload[imgPayloadLen++] = anaR;
-      imgPayload[imgPayloadLen++] = anaG;
-      imgPayload[imgPayloadLen++] = anaB;
+      imgPayload[imgPayloadLen++] = (uint8_t)((anaPix >> 8) & 0xFF);
+      imgPayload[imgPayloadLen++] = (uint8_t)(anaPix & 0xFF);
     }
 
     received += n;
