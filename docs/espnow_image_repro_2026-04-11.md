@@ -76,3 +76,10 @@ Reason:
 ## Notes
 - `ESP_ERR_ESPNOW_NO_MEM` (12391) is queue pressure in the ESP-NOW send path, not a PSRAM requirement issue.
 - PSRAM is helpful for frame buffering, but does not directly fix radio TX queue saturation.
+
+## Image Latency Log
+
+| Timestamp | Image ID | Resolution | Chunks | Latency (ms) | File |
+|---|---:|---|---:|---:|---|
+| 2026-04-11 10:58:26 | 9 | 320x240 | 3600 | 25017 | espnow_rx_0009_320x240_20260411_105826.ppm |
+| 2026-04-11 10:59:23 | 10 | 320x240 | 3600 | 25310 | espnow_rx_0010_320x240_20260411_105923.ppm |

@@ -86,7 +86,7 @@ SERIAL_IMG_FRAME_END = 3
 SERIAL_IMG_MAX_PAYLOAD = 240
 
 # ---------- USER CONFIG ----------
-SERIAL_PORT = "/dev/ttyACM0"
+SERIAL_PORT = "/dev/ttyACM2"
 BAUD = 460_800
 MAX_POINTS = 120
 SENSOR_TIMEOUT_SEC = 2.5
@@ -97,6 +97,7 @@ SENSOR_LOG_PATH = DATA_DIR / "telemetry_merged.csv"
 IMAGE_DIR = DATA_DIR
 DEBUG_LOG_PATH = DATA_DIR / "image_debug.log"
 RAW_SERIAL_LOG_PATH = DATA_DIR / "receiver_serial_raw.log"
+LATENCY_MD_PATH = (Path(__file__).resolve().parent.parent / "docs" / "espnow_image_repro_2026-04-11.md")
 
 
 @dataclass
@@ -229,6 +230,30 @@ def log_raw_serial_line(line: str) -> None:
     raw_serial_log_file.write(f"{stamp} {line}\n")
 
 
+def append_latency_markdown(image_id: int, width: int, height: int, chunks: int, latency_ms: float, file_name: str) -> None:
+    """Append one latency record per received image into the reproducibility markdown file."""
+    try:
+        LATENCY_MD_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        if not LATENCY_MD_PATH.exists():
+            LATENCY_MD_PATH.write_text("# ESP-NOW Image Relay Reproducibility Notes\n\n", encoding="utf-8")
+
+        current = LATENCY_MD_PATH.read_text(encoding="utf-8")
+        if "## Image Latency Log" not in current:
+            with LATENCY_MD_PATH.open("a", encoding="utf-8") as f:
+                f.write("\n## Image Latency Log\n\n")
+                f.write("| Timestamp | Image ID | Resolution | Chunks | Latency (ms) | File |\n")
+                f.write("|---|---:|---|---:|---:|---|\n")
+
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with LATENCY_MD_PATH.open("a", encoding="utf-8") as f:
+            f.write(
+                f"| {stamp} | {image_id} | {width}x{height} | {chunks} | {latency_ms:.0f} | {file_name} |\n"
+            )
+    except Exception as exc:
+        dbg(f"LATENCY_MD_WRITE_FAIL err={exc}")
+
+
 time_buffer = deque([""] * MAX_POINTS, maxlen=MAX_POINTS)
 data_buffers = [deque([0.0] * MAX_POINTS, maxlen=MAX_POINTS) for _ in range(NUM_VARS)]
 
@@ -274,9 +299,11 @@ relay_state_text = fig.text(0.36, 0.01, "Relay: esperando estado", fontsize=10)
 
 current_image: ImageAssembly | None = None
 current_image_last_activity_mono = 0.0
+current_image_begin_mono = 0.0
 binary_image_mode_active = False
 last_sensor_time = 0.0
 last_image_time = 0.0
+last_image_latency_ms = 0.0
 saved_images = 0
 dropped_images = 0
 latest_relay_status = "Relay: sin datos"
@@ -351,7 +378,7 @@ def stop_serial_reader() -> None:
 
 
 def handle_img_begin(line: str) -> None:
-    global current_image, current_image_last_activity_mono
+    global current_image, current_image_last_activity_mono, current_image_begin_mono
     m = BEGIN_RE.match(line)
     if not m:
         return
@@ -370,12 +397,13 @@ def handle_img_begin(line: str) -> None:
         payload=bytearray(),
     )
     current_image_last_activity_mono = time.monotonic()
+    current_image_begin_mono = current_image_last_activity_mono
     dbg(f"BEGIN id={image_id} w={width} h={height} len={data_len}")
     status_text.set_text(f"Recibiendo imagen id={image_id} ({width}x{height})")
 
 
 def handle_img_chunk(line: str) -> None:
-    global current_image, dropped_images, current_image_last_activity_mono
+    global current_image, dropped_images, current_image_last_activity_mono, current_image_begin_mono
     m = CHUNK_RE.match(line)
     if not m:
         return
@@ -392,6 +420,7 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP id_mismatch got={image_id} expected={current_image.image_id} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (id no coincide)")
         return
     if chunk_index != current_image.next_chunk:
@@ -403,12 +432,14 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP chunk_order got={chunk_index} expected={current_image.next_chunk} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (orden de bloques)")
         return
     if len(hex_payload) != n * 2:
         dropped_images += 1
         dbg(f"DROP chunk_size hex_len={len(hex_payload)} expected={n*2} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (tamano de bloque no coincide)")
         return
 
@@ -418,6 +449,7 @@ def handle_img_chunk(line: str) -> None:
         dropped_images += 1
         dbg(f"DROP invalid_hex line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (hex invalido)")
         return
 
@@ -427,7 +459,7 @@ def handle_img_chunk(line: str) -> None:
 
 
 def handle_img_end(line: str) -> None:
-    global current_image, current_image_last_activity_mono, last_image_time, saved_images, dropped_images
+    global current_image, current_image_last_activity_mono, current_image_begin_mono, last_image_time, last_image_latency_ms, saved_images, dropped_images
     m = END_RE.match(line)
     if not m:
         return
@@ -462,6 +494,7 @@ def handle_img_end(line: str) -> None:
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
+        current_image_begin_mono = 0.0
         return
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -482,14 +515,20 @@ def handle_img_end(line: str) -> None:
 
     saved_images += 1
     last_image_time = time.monotonic()
+    if current_image_begin_mono > 0.0:
+        last_image_latency_ms = (last_image_time - current_image_begin_mono) * 1000.0
     current_image_last_activity_mono = 0.0
     dbg(f"END_OK line={line} file={out_name}")
-    status_text.set_text(f"Imagen guardada id={image_id} bloques={chunks}\n{out_name}")
+    status_text.set_text(
+        f"Imagen guardada id={image_id} bloques={chunks} latencia={last_image_latency_ms:.0f} ms\n{out_name}"
+    )
+    append_latency_markdown(image_id, current_image.width, current_image.height, chunks, last_image_latency_ms, out_name)
     current_image = None
+    current_image_begin_mono = 0.0
 
 
 def handle_img_begin_bin(image_id: int, width: int, height: int, data_len: int) -> None:
-    global current_image, current_image_last_activity_mono, binary_image_mode_active
+    global current_image, current_image_last_activity_mono, current_image_begin_mono, binary_image_mode_active
 
     current_image = ImageAssembly(
         image_id=image_id,
@@ -500,13 +539,14 @@ def handle_img_begin_bin(image_id: int, width: int, height: int, data_len: int) 
         payload=bytearray(),
     )
     current_image_last_activity_mono = time.monotonic()
+    current_image_begin_mono = current_image_last_activity_mono
     binary_image_mode_active = True
     dbg(f"BEGIN id={image_id} w={width} h={height} len={data_len}")
     status_text.set_text(f"Recibiendo imagen id={image_id} ({width}x{height})")
 
 
 def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) -> None:
-    global current_image, dropped_images, current_image_last_activity_mono
+    global current_image, dropped_images, current_image_last_activity_mono, current_image_begin_mono
 
     line = f"IMG_CHUNK {image_id} {chunk_index} {n} <bin:{len(chunk)}>"
     if current_image is None:
@@ -516,6 +556,7 @@ def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) 
         dropped_images += 1
         dbg(f"DROP id_mismatch got={image_id} expected={current_image.image_id} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (id no coincide)")
         return
     if chunk_index != current_image.next_chunk:
@@ -527,12 +568,14 @@ def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) 
         dropped_images += 1
         dbg(f"DROP chunk_order got={chunk_index} expected={current_image.next_chunk} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (orden de bloques)")
         return
     if len(chunk) != n:
         dropped_images += 1
         dbg(f"DROP chunk_size len={len(chunk)} expected={n} line={line}")
         current_image = None
+        current_image_begin_mono = 0.0
         status_text.set_text("Imagen descartada (tamano de bloque no coincide)")
         return
 
@@ -542,7 +585,7 @@ def handle_img_chunk_bin(image_id: int, chunk_index: int, n: int, chunk: bytes) 
 
 
 def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> None:
-    global current_image, current_image_last_activity_mono, last_image_time, saved_images, dropped_images, binary_image_mode_active
+    global current_image, current_image_last_activity_mono, current_image_begin_mono, last_image_time, last_image_latency_ms, saved_images, dropped_images, binary_image_mode_active
 
     line = f"IMG_END {image_id} {ok} {chunks} {end_bytes}"
     if current_image is None:
@@ -571,6 +614,7 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
+        current_image_begin_mono = 0.0
         binary_image_mode_active = False
         return
 
@@ -592,10 +636,16 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
 
     saved_images += 1
     last_image_time = time.monotonic()
+    if current_image_begin_mono > 0.0:
+        last_image_latency_ms = (last_image_time - current_image_begin_mono) * 1000.0
     current_image_last_activity_mono = 0.0
     dbg(f"END_OK line={line} file={out_name}")
-    status_text.set_text(f"Imagen guardada id={image_id} bloques={chunks}\n{out_name}")
+    status_text.set_text(
+        f"Imagen guardada id={image_id} bloques={chunks} latencia={last_image_latency_ms:.0f} ms\n{out_name}"
+    )
+    append_latency_markdown(image_id, current_image.width, current_image.height, chunks, last_image_latency_ms, out_name)
     current_image = None
+    current_image_begin_mono = 0.0
     binary_image_mode_active = False
 
 
@@ -823,7 +873,7 @@ def split_protocol_fragments(line: str) -> list[str]:
 
 
 def update_plot(_frame: int):
-    global current_image, current_image_last_activity_mono, last_sensor_time, last_file_flush_mono, dropped_images
+    global current_image, current_image_last_activity_mono, current_image_begin_mono, last_sensor_time, last_file_flush_mono, dropped_images
 
     sensor_updated = process_serial_buffer()
 
@@ -858,6 +908,7 @@ def update_plot(_frame: int):
             status_text.set_text("Image dropped (receive timeout)")
             current_image = None
             current_image_last_activity_mono = 0.0
+            current_image_begin_mono = 0.0
 
     if last_sensor_time == 0.0:
         telemetry_state_text.set_text("Flujo de sensores: esperando")
@@ -876,7 +927,7 @@ def update_plot(_frame: int):
     else:
         img_age = now_mono - last_image_time
         ax_img.set_xlabel(
-            f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images} | ultima imagen hace {img_age:.1f}s"
+            f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images} | latencia ult={last_image_latency_ms:.0f} ms | ultima imagen hace {img_age:.1f}s"
         )
 
     relay_state_text.set_text(latest_relay_status)

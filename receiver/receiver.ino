@@ -469,6 +469,10 @@ void handleImagePacket(const uint8_t *data, int len) {
     g_imgChunkPayload = b.chunkPayload;
     g_imgExpectedChunk = 0;
     g_imgReceivedBytes = 0;
+
+    // Emit IMG_BEGIN as soon as the first valid image packet is accepted.
+    // This gives downstream tools an earlier, more useful start timestamp.
+    signalImageBegin(g_imgImageId, g_imgWidth, g_imgHeight, g_imgDataLen);
     return;
   }
 
@@ -897,7 +901,6 @@ void loop() {
     uint32_t n = g_imgEmitDataLen;
     portEXIT_CRITICAL(&g_mux);
 
-    signalImageBegin(id, w, h, n);
     nextChunkEmitMs = millis() + IMG_SERIAL_CHUNK_INTERVAL_MS;
         IMG_DBG("IMG_DBG emit_begin id=%u w=%u h=%u len=%lu\n",
           (unsigned)id,
