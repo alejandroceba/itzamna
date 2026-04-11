@@ -28,7 +28,7 @@
 // ============================================================================
 #define WIFI_CHANNEL 6
 //uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
-uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // Sender MAC address
+uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC address
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
@@ -156,7 +156,6 @@ uint32_t droppedImagePackets = 0;
 uint32_t invalidImagePackets = 0;
 uint32_t rejectedSourcePackets = 0;
 unsigned long lastRelayStatusPrint = 0;
-unsigned long imageSendRetryAfter = 0;
 
 portMUX_TYPE imageMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -209,7 +208,6 @@ void printDebugData();
 void processImageForwarding(unsigned long now);
 bool enqueueImagePacket(const uint8_t *data, uint16_t len);
 bool dequeueImagePacket(ImageForwardItem &out);
-bool peekImagePacket(ImageForwardItem &out);
 bool isValidImagePacket(const uint8_t *data, int len);
 bool isSameMac(const uint8_t *a, const uint8_t *b);
 void copyMac(uint8_t *dst, const uint8_t *src);
@@ -235,7 +233,6 @@ void setup() {
   // --- WiFi & ESP-NOW Setup ---
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
-  WiFi.setSleep(false);
   // Configure WiFi parameters for reliable communication
   esp_err_t err;
   
@@ -247,9 +244,6 @@ void setup() {
   
   err = esp_wifi_set_max_tx_power(78);
   if (err != ESP_OK && DEBUG) Serial.printf("WiFi TX power config failed: %d\n", err);
-
-  err = esp_wifi_set_ps(WIFI_PS_NONE);
-  if (err != ESP_OK && DEBUG) Serial.printf("WiFi power save config failed: %d\n", err);
   
   err = esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (err != ESP_OK && DEBUG) Serial.printf("WiFi channel config failed: %d\n", err);
@@ -395,13 +389,6 @@ bool dequeueImagePacket(ImageForwardItem &out) {
   return true;
 }
 
-bool peekImagePacket(ImageForwardItem &out) {
-  if (imageQueueTail == imageQueueHead) return false;
-
-  out = imageQueue[imageQueueTail];
-  return true;
-}
-
 bool isValidImagePacket(const uint8_t *data, int len) {
   if (!data || len <= 0 || len > ESPNOW_MAX_PAYLOAD) return false;
 
@@ -410,25 +397,11 @@ bool isValidImagePacket(const uint8_t *data, int len) {
     if (len != (int)sizeof(BeginPacket)) return false;
     BeginPacket begin{};
     memcpy(&begin, data, sizeof(BeginPacket));
-
-    if (begin.magic != PACKET_MAGIC) return false;
-    if (begin.width == 0 || begin.height == 0) return false;
-    if (begin.chunkPayload == 0 || begin.chunkPayload > (ESPNOW_MAX_PAYLOAD - 7)) return false;
-
-    uint32_t pixels = (uint32_t)begin.width * (uint32_t)begin.height;
-    uint32_t expectedRgb565 = pixels * 2UL;
-    uint32_t expectedRgb888 = pixels * 3UL;
-    if (begin.dataLen != expectedRgb565 && begin.dataLen != expectedRgb888) return false;
-
-    return true;
+    return begin.magic == PACKET_MAGIC;
   }
 
   if (type == PKT_CHUNK) {
-    if (len < 7) return false;
-
-    uint16_t n = (uint16_t)data[5] | ((uint16_t)data[6] << 8);
-    if (n == 0 || n > (ESPNOW_MAX_PAYLOAD - 7)) return false;
-    return len == (int)(7 + n);
+    return len >= 7;
   }
 
   if (type == PKT_END) {
@@ -480,10 +453,6 @@ void processImageForwarding(unsigned long now) {
     ? IMG_FORWARD_MIN_GAP_MS_SAFE
     : IMG_FORWARD_MIN_GAP_MS_FAST;
 
-  if (now < imageSendRetryAfter) {
-    return;
-  }
-
   if (now - lastImageForwardTime < minGapMs) {
     return;
   }
@@ -493,22 +462,18 @@ void processImageForwarding(unsigned long now) {
     ImageForwardItem item{};
 
     portENTER_CRITICAL(&imageMux);
-    bool hasItem = peekImagePacket(item);
+    bool hasItem = dequeueImagePacket(item);
     portEXIT_CRITICAL(&imageMux);
 
     if (!hasItem) break;
 
     esp_err_t err = esp_now_send(receiverMAC, item.data, item.len);
     if (err == ESP_OK) {
-      portENTER_CRITICAL(&imageMux);
-      dequeueImagePacket(item);
-      portEXIT_CRITICAL(&imageMux);
-
       forwardedImagePackets++;
       sentThisLoop++;
       lastImageForwardTime = now;
     } else {
-      imageSendRetryAfter = now + 5;
+      droppedImagePackets++;
       break;
     }
   }

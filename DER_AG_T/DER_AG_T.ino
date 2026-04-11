@@ -17,7 +17,7 @@ static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
 static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
-static const uint8_t IMAGE_SEND_GAP_MS = 10;
+static const uint8_t IMAGE_SEND_GAP_MS = 15;
 
 // TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
 // and replace SENDER_MAC with the real unicast target.
@@ -343,8 +343,10 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     return false;
   }
 
+  uint32_t anaglyphLen = (uint32_t)width * height * 3;
+
   bool espOk = true;
-  if (!sendImageBegin(imageId, width, height, expectedLen)) {
+  if (!sendImageBegin(imageId, width, height, anaglyphLen)) {
     Serial.println("[DER] No se pudo enviar PKT_BEGIN de anaglifo");
     espOk = false;
   }
@@ -387,9 +389,11 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
       uint8_t rightG = rightGray[pixelIndex++];
-      uint16_t anaPix = packAnaglyphRGB565(leftGray, rightG);
+      uint8_t anaR = leftGray;
+      uint8_t anaG = rightG;
+      uint8_t anaB = rightG;
 
-      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 2)) {
+      if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 3)) {
         if (!sendImageChunk(imageId, chunkIndex, imgPayload, imgPayloadLen)) {
           espOk = false;
         }
@@ -398,8 +402,9 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
         imgPayloadLen = 0;
       }
 
-      imgPayload[imgPayloadLen++] = (uint8_t)((anaPix >> 8) & 0xFF);
-      imgPayload[imgPayloadLen++] = (uint8_t)(anaPix & 0xFF);
+      imgPayload[imgPayloadLen++] = anaR;
+      imgPayload[imgPayloadLen++] = anaG;
+      imgPayload[imgPayloadLen++] = anaB;
     }
 
     received += n;
@@ -415,15 +420,15 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     chunkIndex++;
   }
 
-  if (sentAnaglyphBytes != expectedLen) {
+  if (sentAnaglyphBytes != anaglyphLen) {
     Serial.printf("[DER] Mismatch bytes anaglifo: enviados=%lu esperados=%lu\n",
                   (unsigned long)sentAnaglyphBytes,
-                  (unsigned long)expectedLen);
+                  (unsigned long)anaglyphLen);
     return false;
   }
 
   if (espOk) {
-    if (!sendImageEnd(imageId, chunkIndex, expectedLen)) {
+    if (!sendImageEnd(imageId, chunkIndex, anaglyphLen)) {
       espOk = false;
     }
   }
