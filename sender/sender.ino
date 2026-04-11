@@ -28,7 +28,7 @@
 // ============================================================================
 #define WIFI_CHANNEL 6
 //uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
-uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC address
+uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC addressd8:3b:da:45:cd:24
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
@@ -64,7 +64,7 @@ const unsigned long SEND_INTERVAL_MS = 1000.0;    // 1 Hz ESP-NOW transmission r
 #define IMG_FORWARD_MODE 1
 
 const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_SAFE = 1;
-const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 8;
+const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 9;
 const unsigned long IMG_FORWARD_MIN_GAP_MS_SAFE = 12;
 const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 0;
 
@@ -129,7 +129,7 @@ struct __attribute__((packed)) ImageForwardItem {
   uint8_t data[ESPNOW_MAX_PAYLOAD];
 };
 
-static const uint8_t IMG_FORWARD_QUEUE_SIZE = 24;
+static const uint8_t IMG_FORWARD_QUEUE_SIZE = 40;
 
 // ============================================================================
 // GLOBAL VARIABLES - TRANSMISSION
@@ -219,6 +219,7 @@ void setup() {
   // --- Serial Communication ---
   Serial.begin(115200);
   delay(500);  // Allow serial stabilization
+  randomSeed((unsigned long)micros());
   
   if (DEBUG) {
     Serial.println("\n========================================");
@@ -272,7 +273,9 @@ void setup() {
   if (DEBUG) Serial.println("✓ ESP-NOW configured\n");
   
   // --- Sensor Initialization ---
+#if 0
   initializeSensors();
+#endif
   
   if (DEBUG) {
     Serial.println("\n========================================");
@@ -397,11 +400,19 @@ bool isValidImagePacket(const uint8_t *data, int len) {
     if (len != (int)sizeof(BeginPacket)) return false;
     BeginPacket begin{};
     memcpy(&begin, data, sizeof(BeginPacket));
-    return begin.magic == PACKET_MAGIC;
+    if (begin.magic != PACKET_MAGIC) return false;
+    if (begin.width == 0 || begin.height == 0) return false;
+    if (begin.chunkPayload == 0 || begin.chunkPayload > (ESPNOW_MAX_PAYLOAD - 7)) return false;
+
+    uint32_t expectedRgb565 = (uint32_t)begin.width * (uint32_t)begin.height * 2UL;
+    return begin.dataLen == expectedRgb565;
   }
 
   if (type == PKT_CHUNK) {
-    return len >= 7;
+    if (len < 7) return false;
+    uint16_t n = (uint16_t)data[5] | ((uint16_t)data[6] << 8);
+    if (n == 0 || n > (ESPNOW_MAX_PAYLOAD - 7)) return false;
+    return len == (int)(7 + n);
   }
 
   if (type == PKT_END) {
@@ -467,7 +478,21 @@ void processImageForwarding(unsigned long now) {
 
     if (!hasItem) break;
 
-    esp_err_t err = esp_now_send(receiverMAC, item.data, item.len);
+    esp_err_t err = ESP_FAIL;
+    for (uint8_t attempt = 0; attempt < 3; attempt++) {
+      err = esp_now_send(receiverMAC, item.data, item.len);
+      if (err == ESP_OK) {
+        break;
+      }
+
+      if (err == ESP_ERR_ESPNOW_NO_MEM) {
+        delay(2 + attempt * 2);
+      } else {
+        delay(1);
+      }
+      yield();
+    }
+
     if (err == ESP_OK) {
       forwardedImagePackets++;
       sentThisLoop++;
@@ -550,6 +575,7 @@ void calibrateAccelerometer() {
 // READ ALL SENSORS AT 100 Hz
 // ============================================================================
 void readAllSensors() {
+#if 0
   sensorData.temperature_bme280 = bme.readTemperature();
   sensorData.pressure_hpa = (bme.readPressure() / 100.0f) - 74.0f;
   sensorData.altitude_m = bme.readAltitude(1013.25f);
@@ -569,6 +595,20 @@ void readAllSensors() {
     // Remove gravity assuming sensor Z axis is vertical.
     current_accel_z -= 9.81f;
   }
+
+  sensorData.accel_x = current_accel_x;
+  sensorData.accel_y = current_accel_y;
+  sensorData.accel_z = current_accel_z;
+#endif
+
+  sensorData.temperature_bme280 = 25.0f + random(0, 500) / 100.0f;
+  sensorData.temperature_ds18b20 = 25.0f + random(0, 500) / 100.0f;
+  sensorData.pressure_hpa = 804.0f + random(0, 600) / 100.0f;
+  sensorData.altitude_m = 1170.0f + random(0, 300) / 100.0f;
+
+  current_accel_x = random(-300, 301) / 1000.0f;
+  current_accel_y = random(-300, 301) / 1000.0f;
+  current_accel_z = random(-300, 301) / 1000.0f;
 
   sensorData.accel_x = current_accel_x;
   sensorData.accel_y = current_accel_y;

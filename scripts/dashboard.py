@@ -90,7 +90,8 @@ SERIAL_PORT = "/dev/ttyACM2"
 BAUD = 460_800
 MAX_POINTS = 120
 SENSOR_TIMEOUT_SEC = 2.5
-IMAGE_ASSEMBLY_TIMEOUT_SEC = 5.0
+# ESP-NOW image bursts can pause for several seconds; keep assembly alive longer.
+IMAGE_ASSEMBLY_TIMEOUT_SEC = 20.0
 
 DATA_DIR = (Path(__file__).resolve().parent.parent / "data")
 SENSOR_LOG_PATH = DATA_DIR / "telemetry_merged.csv"
@@ -194,6 +195,23 @@ def save_pgm(path: Path, width: int, height: int, pixels: bytes) -> None:
 def save_ppm(path: Path, width: int, height: int, pixels: bytes) -> None:
     header = f"P6\n{width} {height}\n255\n".encode("ascii")
     path.write_bytes(header + pixels)
+
+
+def rgb565_to_rgb888(payload: bytes) -> bytes:
+    p = np.frombuffer(payload, dtype=">u2")
+    r5 = (p >> 11) & 0x1F
+    g6 = (p >> 5) & 0x3F
+    b5 = p & 0x1F
+
+    r8 = (r5 * 255 // 31).astype(np.uint8)
+    g8 = (g6 * 255 // 63).astype(np.uint8)
+    b8 = (b5 * 255 // 31).astype(np.uint8)
+
+    rgb = np.empty((p.size, 3), dtype=np.uint8)
+    rgb[:, 0] = r8
+    rgb[:, 1] = g8
+    rgb[:, 2] = b8
+    return rgb.tobytes()
 
 
 # %%
@@ -475,14 +493,14 @@ def handle_img_end(line: str) -> None:
 
     payload = bytes(current_image.payload)
     expected_pixels = current_image.width * current_image.height
-    expected_rgb = expected_pixels * 3
+    expected_rgb565 = expected_pixels * 2
     valid = (
         image_id == current_image.image_id
         and ok == 1
         and chunks == current_image.next_chunk
         and end_bytes == current_image.data_len
         and len(payload) == current_image.data_len
-        and (len(payload) == expected_pixels or len(payload) == expected_rgb)
+        and (len(payload) == expected_pixels or len(payload) == expected_rgb565)
     )
 
     if not valid:
@@ -490,7 +508,7 @@ def handle_img_end(line: str) -> None:
         dbg(
             "DROP end_validation "
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
-            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb={expected_rgb}"
+            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb565={expected_rgb565}"
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
@@ -498,13 +516,15 @@ def handle_img_end(line: str) -> None:
         return
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    is_rgb = len(payload) == expected_rgb
+    is_rgb565 = len(payload) == expected_rgb565
+    is_rgb = is_rgb565
     ext = "ppm" if is_rgb else "pgm"
     out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.{ext}"
     out_path = IMAGE_DIR / out_name
-    if is_rgb:
-        save_ppm(out_path, current_image.width, current_image.height, payload)
-        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
+    if is_rgb565:
+        rgb_payload = rgb565_to_rgb888(payload)
+        save_ppm(out_path, current_image.width, current_image.height, rgb_payload)
+        img_arr = np.frombuffer(rgb_payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
     else:
         save_pgm(out_path, current_image.width, current_image.height, payload)
         img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
@@ -595,14 +615,14 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
 
     payload = bytes(current_image.payload)
     expected_pixels = current_image.width * current_image.height
-    expected_rgb = expected_pixels * 3
+    expected_rgb565 = expected_pixels * 2
     valid = (
         image_id == current_image.image_id
         and ok == 1
         and chunks == current_image.next_chunk
         and end_bytes == current_image.data_len
         and len(payload) == current_image.data_len
-        and (len(payload) == expected_pixels or len(payload) == expected_rgb)
+        and (len(payload) == expected_pixels or len(payload) == expected_rgb565)
     )
 
     if not valid:
@@ -610,7 +630,7 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
         dbg(
             "DROP end_validation "
             f"line={line} payload_len={len(payload)} expected={current_image.data_len} "
-            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb={expected_rgb}"
+            f"chunks={current_image.next_chunk} expected_pixels={expected_pixels} expected_rgb565={expected_rgb565}"
         )
         status_text.set_text("Imagen descartada (validacion final)")
         current_image = None
@@ -619,13 +639,15 @@ def handle_img_end_bin(image_id: int, ok: int, chunks: int, end_bytes: int) -> N
         return
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    is_rgb = len(payload) == expected_rgb
+    is_rgb565 = len(payload) == expected_rgb565
+    is_rgb = is_rgb565
     ext = "ppm" if is_rgb else "pgm"
     out_name = f"espnow_rx_{image_id:04d}_{current_image.width}x{current_image.height}_{ts}.{ext}"
     out_path = IMAGE_DIR / out_name
-    if is_rgb:
-        save_ppm(out_path, current_image.width, current_image.height, payload)
-        img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
+    if is_rgb565:
+        rgb_payload = rgb565_to_rgb888(payload)
+        save_ppm(out_path, current_image.width, current_image.height, rgb_payload)
+        img_arr = np.frombuffer(rgb_payload, dtype=np.uint8).reshape((current_image.height, current_image.width, 3))
     else:
         save_pgm(out_path, current_image.width, current_image.height, payload)
         img_arr = np.frombuffer(payload, dtype=np.uint8).reshape((current_image.height, current_image.width))
@@ -903,9 +925,12 @@ def update_plot(_frame: int):
             dbg(
                 "DROP image_timeout "
                 f"id={current_image.image_id} next_chunk={current_image.next_chunk} "
-                f"bytes={len(current_image.payload)} idle_s={idle:.2f}"
+                f"bytes={len(current_image.payload)}/{current_image.data_len} "
+                f"idle_s={idle:.2f} timeout_s={IMAGE_ASSEMBLY_TIMEOUT_SEC:.2f}"
             )
-            status_text.set_text("Image dropped (receive timeout)")
+            status_text.set_text(
+                f"Image dropped (receive timeout {idle:.1f}s, chunks={current_image.next_chunk})"
+            )
             current_image = None
             current_image_last_activity_mono = 0.0
             current_image_begin_mono = 0.0

@@ -22,8 +22,8 @@ static const uint8_t PKT_END = 3;
 static const uint8_t PKT_ACK = 4;
 static const uint16_t IMG_MAX_CHUNK_PAYLOAD = 200;
 static const uint32_t IMG_MAX_IMAGE_BYTES = 300000;   // supports QVGA RGB anaglyph payloads
-static const uint16_t IMG_SERIAL_CHUNK_BYTES = 64;    // smaller lines are more robust over USB CDC serial
-static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 6; // extra pacing reduces host-side parser overruns
+static const uint16_t IMG_SERIAL_CHUNK_BYTES = 96;    // first latency step: larger chunks reduce serial overhead
+static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 2; // second latency step: reduce per-chunk wait while keeping chunk size unchanged
 static const uint8_t IMG_SERIAL_CHUNK_DUPLICATES = 1;  // one line per chunk keeps logs readable while preserving sequence debug
 static const uint8_t IMG_SERIAL_BEGIN_REPEATS = 1;     // one begin line is enough with current parser/transport
 static const uint16_t IMG_SERIAL_CHUNK_LINE_STRIDE = 1; // test mode: emit every chunk line so dashboard can fully reconstruct image
@@ -413,8 +413,11 @@ void handleImagePacket(const uint8_t *data, int len) {
     BeginPacket b;
     memcpy(&b, data, sizeof(BeginPacket));
 
+    uint32_t expectedRgb565 = (uint32_t)b.width * (uint32_t)b.height * 2UL;
+
     if (b.magic != PACKET_MAGIC ||
         b.dataLen == 0 ||
+      b.dataLen != expectedRgb565 ||
         b.dataLen > IMG_MAX_IMAGE_BYTES ||
         b.chunkPayload == 0 ||
         b.chunkPayload > IMG_MAX_CHUNK_PAYLOAD) {
