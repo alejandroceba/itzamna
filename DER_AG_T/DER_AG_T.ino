@@ -23,7 +23,7 @@ static const uint8_t IMAGE_SEND_GAP_MS = 10;
 // and replace SENDER_MAC with the real unicast target.
 // Keep broadcast only for initial bring-up.
 static const bool IMAGE_SEND_BROADCAST = false;
-static uint8_t SENDER_MAC[6] = {0x10, 0x20, 0xBA, 0x03, 0x99, 0x9C};
+static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0x8b, 0x8a, 0x34};
 
 // Protocolo
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
@@ -208,10 +208,12 @@ bool initCamera() {
 bool initEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  WiFi.setSleep(false);
 
   esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
   esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
   esp_wifi_set_max_tx_power(78);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
   if (esp_now_init() != ESP_OK) {
@@ -245,18 +247,14 @@ bool sendEspNowPacket(const uint8_t *data, size_t len) {
   if (!data || len == 0 || len > 250) return false;
 
   esp_err_t err = ESP_FAIL;
-  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+  for (uint8_t attempt = 0; attempt < 5; attempt++) {
     err = esp_now_send(g_senderPeerAddr, data, len);
     if (err == ESP_OK) {
       break;
     }
 
-    if (err == ESP_ERR_ESPNOW_NO_MEM) {
-      delay((attempt + 1) * 4);
-      continue;
-    }
-
-    break;
+    delay((attempt + 1) * 3);
+    yield();
   }
 
   if (err != ESP_OK) {

@@ -712,10 +712,12 @@ void setup() {
                 (unsigned)ESP.getFreeHeap());
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
 
   esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
   esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
   esp_wifi_set_max_tx_power(78);
+  esp_wifi_set_ps(WIFI_PS_NONE);
   esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
   if (esp_now_init() != ESP_OK) {

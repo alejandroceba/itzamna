@@ -64,9 +64,9 @@ const unsigned long SEND_INTERVAL_MS = 1000.0;    // 1 Hz ESP-NOW transmission r
 #define IMG_FORWARD_MODE 1
 
 const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_SAFE = 1;
-const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 4;
+const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 8;
 const unsigned long IMG_FORWARD_MIN_GAP_MS_SAFE = 12;
-const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 3;
+const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 0;
 
 // ============================================================================
 // SENSOR OBJECT INSTANTIATION
@@ -156,6 +156,7 @@ uint32_t droppedImagePackets = 0;
 uint32_t invalidImagePackets = 0;
 uint32_t rejectedSourcePackets = 0;
 unsigned long lastRelayStatusPrint = 0;
+unsigned long imageSendRetryAfter = 0;
 
 portMUX_TYPE imageMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -208,6 +209,7 @@ void printDebugData();
 void processImageForwarding(unsigned long now);
 bool enqueueImagePacket(const uint8_t *data, uint16_t len);
 bool dequeueImagePacket(ImageForwardItem &out);
+bool peekImagePacket(ImageForwardItem &out);
 bool isValidImagePacket(const uint8_t *data, int len);
 bool isSameMac(const uint8_t *a, const uint8_t *b);
 void copyMac(uint8_t *dst, const uint8_t *src);
@@ -233,6 +235,7 @@ void setup() {
   // --- WiFi & ESP-NOW Setup ---
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
+  WiFi.setSleep(false);
   // Configure WiFi parameters for reliable communication
   esp_err_t err;
   
@@ -244,6 +247,9 @@ void setup() {
   
   err = esp_wifi_set_max_tx_power(78);
   if (err != ESP_OK && DEBUG) Serial.printf("WiFi TX power config failed: %d\n", err);
+
+  err = esp_wifi_set_ps(WIFI_PS_NONE);
+  if (err != ESP_OK && DEBUG) Serial.printf("WiFi power save config failed: %d\n", err);
   
   err = esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (err != ESP_OK && DEBUG) Serial.printf("WiFi channel config failed: %d\n", err);
@@ -389,6 +395,13 @@ bool dequeueImagePacket(ImageForwardItem &out) {
   return true;
 }
 
+bool peekImagePacket(ImageForwardItem &out) {
+  if (imageQueueTail == imageQueueHead) return false;
+
+  out = imageQueue[imageQueueTail];
+  return true;
+}
+
 bool isValidImagePacket(const uint8_t *data, int len) {
   if (!data || len <= 0 || len > ESPNOW_MAX_PAYLOAD) return false;
 
@@ -467,6 +480,10 @@ void processImageForwarding(unsigned long now) {
     ? IMG_FORWARD_MIN_GAP_MS_SAFE
     : IMG_FORWARD_MIN_GAP_MS_FAST;
 
+  if (now < imageSendRetryAfter) {
+    return;
+  }
+
   if (now - lastImageForwardTime < minGapMs) {
     return;
   }
@@ -476,18 +493,22 @@ void processImageForwarding(unsigned long now) {
     ImageForwardItem item{};
 
     portENTER_CRITICAL(&imageMux);
-    bool hasItem = dequeueImagePacket(item);
+    bool hasItem = peekImagePacket(item);
     portEXIT_CRITICAL(&imageMux);
 
     if (!hasItem) break;
 
     esp_err_t err = esp_now_send(receiverMAC, item.data, item.len);
     if (err == ESP_OK) {
+      portENTER_CRITICAL(&imageMux);
+      dequeueImagePacket(item);
+      portEXIT_CRITICAL(&imageMux);
+
       forwardedImagePackets++;
       sentThisLoop++;
       lastImageForwardTime = now;
     } else {
-      droppedImagePackets++;
+      imageSendRetryAfter = now + 5;
       break;
     }
   }
