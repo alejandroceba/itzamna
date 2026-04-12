@@ -214,6 +214,9 @@ void setup() {
   Serial.begin(115200);
   delay(800);
   Serial.printf("[IZQ] continuous_mode=%u\n", (unsigned)CONTINUOUS_CAPTURE_MODE);
+  if (CONTINUOUS_CAPTURE_MODE) {
+    Serial.println("[IZQ] autostart capture enabled (no first trigger needed)");
+  }
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
@@ -235,7 +238,11 @@ void loop() {
   g_busy = true;
   while (Link.available()) Link.read();
 
-  Serial.println("\n[IZQ] Trigger detectado");
+  if (CONTINUOUS_CAPTURE_MODE) {
+    Serial.println("\n[IZQ] Ciclo continuo");
+  } else {
+    Serial.println("\n[IZQ] Trigger detectado");
+  }
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {

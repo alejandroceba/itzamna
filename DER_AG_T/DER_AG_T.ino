@@ -17,14 +17,14 @@ static const uint8_t PKT_BEGIN = 1;
 static const uint8_t PKT_CHUNK = 2;
 static const uint8_t PKT_END = 3;
 static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
-static const uint8_t IMAGE_SEND_GAP_MS = 4;
+static const uint8_t IMAGE_SEND_GAP_MS = 5;
 static const uint8_t IMAGE_SEND_MAX_RETRIES = 12;
 
 // Capture mode:
 // true  = keep capturing/sending continuously
 // false = capture only on button press
 static const bool CONTINUOUS_CAPTURE_MODE = true;
-static const uint16_t CONTINUOUS_GUARD_DELAY_MS = 1800;
+static const uint16_t CONTINUOUS_GUARD_DELAY_MS = 2400;
 
 // Redundancy mode:
 // true  = send second redundant copy
@@ -39,8 +39,9 @@ static const uint8_t REDUNDANCY_DELAY_MODE = 0;
 // and replace SENDER_MAC with the real unicast target.
 // Keep broadcast only for initial bring-up.
 static const bool IMAGE_SEND_BROADCAST = false;
-static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0x8b, 0x8a, 0x34};
-
+//static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0x8b, 0x8a, 0x34};
+static uint8_t SENDER_MAC[6] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};
+//d8:3b:da:46:57:84
 // Protocolo
 // Header: [MAGIC(2)][WIDTH(2)][HEIGHT(2)][LEN(4)]
 static const uint16_t MAGIC = 0xA55A;
@@ -891,6 +892,9 @@ void setup() {
   Serial.printf("[DER] continuous_mode=%u redundancy=%u\n",
                 (unsigned)CONTINUOUS_CAPTURE_MODE,
                 (unsigned)ENABLE_REDUNDANCY);
+  if (CONTINUOUS_CAPTURE_MODE) {
+    Serial.println("[DER] autostart capture enabled (no first trigger needed)");
+  }
 
   pinMode(BTN_PIN, INPUT_PULLUP);
   Link.setRxBufferSize(4096);
@@ -920,7 +924,11 @@ void loop() {
   uint32_t tStart = millis();
   uint16_t imageId = g_imageId++;
 
-  Serial.println("\n[DER] Trigger detectado");
+  if (CONTINUOUS_CAPTURE_MODE) {
+    Serial.println("\n[DER] Ciclo continuo");
+  } else {
+    Serial.println("\n[DER] Trigger detectado");
+  }
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {

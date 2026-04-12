@@ -28,7 +28,9 @@
 // ============================================================================
 #define WIFI_CHANNEL 6
 //uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
-uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC address
+//uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC address
+uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};
+
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
@@ -64,7 +66,7 @@ const unsigned long SEND_INTERVAL_MS = 1000.0;    // 1 Hz ESP-NOW transmission r
 #define IMG_FORWARD_MODE 1
 
 const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_SAFE = 1;
-const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 10;
+const uint8_t IMG_FORWARD_PACKETS_PER_LOOP_FAST = 9;
 const unsigned long IMG_FORWARD_MIN_GAP_MS_SAFE = 12;
 const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 0;
 
@@ -589,7 +591,7 @@ void readAllSensors() {
     current_accel_z -= bias_accel_z * 9.81f;
 
     // Remove gravity assuming sensor Z axis is vertical.
-    current_accel_z -= 9.81f;
+    //current_accel_z -= 9.81f;
   }
 
   sensorData.accel_x = current_accel_x;

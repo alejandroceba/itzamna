@@ -35,7 +35,7 @@ LABELS = [
     "Paquete #",
     "Distancia",
     "RSSI",
-    "RSSI Suavizado",
+    "Latencia",
     "Tasa de Perdida",
     "Rendimiento",
     "Temp BME280",
@@ -53,7 +53,7 @@ UNITS = [
     "#",
     "m",
     "dBm",
-    "dBm",
+    "ms",
     "%",
     "kbps",
     "degC",
@@ -69,7 +69,7 @@ UNITS = [
 ]
 
 NUM_VARS = len(LABELS)
-NUM_COLS = 2
+NUM_COLS = 4
 NUM_ROWS = math.ceil(NUM_VARS / NUM_COLS)
 
 # Image line protocol from merged receiver.ino
@@ -86,7 +86,7 @@ SERIAL_IMG_FRAME_END = 3
 SERIAL_IMG_MAX_PAYLOAD = 240
 
 # ---------- USER CONFIG ----------
-SERIAL_PORT = "/dev/ttyACM2"
+SERIAL_PORT = "/dev/ttyACM1"
 BAUD = 460_800
 MAX_POINTS = 120
 SENSOR_TIMEOUT_SEC = 2.5
@@ -273,34 +273,102 @@ def append_latency_markdown(image_id: int, width: int, height: int, chunks: int,
 
 
 time_buffer = deque([""] * MAX_POINTS, maxlen=MAX_POINTS)
-data_buffers = [deque([0.0] * MAX_POINTS, maxlen=MAX_POINTS) for _ in range(NUM_VARS)]
+initial_values = [0.0] * NUM_VARS
+initial_values[6] = 25.0   # Temp BME280
+initial_values[7] = 25.0   # Temp DS18B20
+initial_values[8] = 800.0  # Presion
+initial_values[9] = 1200.0 # Altitud
+data_buffers = [deque([initial_values[i]] * MAX_POINTS, maxlen=MAX_POINTS) for i in range(NUM_VARS)]
 
-fig = plt.figure(figsize=(17, 2.1 * NUM_ROWS))
-gs = fig.add_gridspec(NUM_ROWS, NUM_COLS + 1, width_ratios=[1.0, 1.0, 1.2])
+# Re-running this cell in VS Code Interactive can leave a previous widget alive.
+# Clean it up so only one dashboard is displayed.
+try:
+    prev_ani = globals().get("_dashboard_ani")
+    if prev_ani is not None:
+        prev_ani.event_source.stop()
+except Exception:
+    pass
+
+try:
+    prev_timer = globals().get("_dashboard_timer")
+    if prev_timer is not None:
+        prev_timer.stop()
+except Exception:
+    pass
+
+try:
+    prev_fig = globals().get("_dashboard_fig")
+    if prev_fig is not None:
+        plt.close(prev_fig)
+except Exception:
+    pass
+
+fig = plt.figure(num="", figsize=(16, 9), constrained_layout=True)
+fig.patch.set_facecolor("white")
+gs = fig.add_gridspec(NUM_ROWS, NUM_COLS + 1, width_ratios=[1.0, 1.0, 1.0, 1.0, 1.35])
+try:
+    # Hide the ipympl header that shows "Figure N" in VS Code Interactive.
+    fig.canvas.header_visible = False
+    fig.canvas.footer_visible = False
+    fig.canvas.toolbar_visible = False
+    fig.canvas.toolbar_position = "bottom"
+    # Keep the widget inside the visible interactive viewport at 100% zoom.
+    fig.canvas.layout.width = "100%"
+    fig.canvas.layout.height = "78vh"
+    fig.canvas.manager.set_window_title("")
+    fig.set_label("")
+except Exception:
+    pass
 
 axes = []
 lines = []
+value_texts = []
 for i in range(NUM_VARS):
     r = i // NUM_COLS
     c = i % NUM_COLS
     ax = fig.add_subplot(gs[r, c])
-    line, = ax.plot(range(MAX_POINTS), data_buffers[i], label=LABELS[i], color=f"C{i % 10}")
-    ax.set_ylabel(UNITS[i], fontsize="small")
-    ax.legend(loc="upper left", fontsize="xx-small")
-    ax.grid(True, alpha=0.2)
+    line, = ax.plot(range(MAX_POINTS), data_buffers[i], color="#0072B2", linewidth=1.9)
+    ax.set_facecolor("white")
+    ax.grid(True, axis="y", color="#111111", alpha=0.14, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.set_xticks([])
+    ax.tick_params(axis="x", length=0)
+    ax.tick_params(axis="y", labelsize=8, colors="#111111")
+    ax.text(
+        0.02,
+        0.93,
+        LABELS[i],
+        transform=ax.transAxes,
+        fontsize=9,
+        fontweight="bold",
+        color="white",
+        bbox=dict(facecolor="#111111", edgecolor="none", boxstyle="round,pad=0.25"),
+    )
+    val_txt = ax.text(
+        0.98,
+        0.93,
+        f"0 {UNITS[i]}",
+        transform=ax.transAxes,
+        ha="right",
+        va="center",
+        fontsize=10,
+        fontweight="bold",
+        color="#111111",
+    )
     axes.append(ax)
     lines.append(line)
+    value_texts.append(val_txt)
 
-bottom_row_start = (NUM_ROWS - 1) * NUM_COLS
-for idx in range(bottom_row_start, min(bottom_row_start + NUM_COLS, NUM_VARS)):
-    axes[idx].set_xlabel("Marca de tiempo")
+right_gs = gs[:, NUM_COLS].subgridspec(3, 1, height_ratios=[4.2, 1.0, 1.0], hspace=0.14)
 
-ax_img = fig.add_subplot(gs[:, 2])
+ax_img = fig.add_subplot(right_gs[0, 0])
 preview = np.zeros((120, 120), dtype=np.uint8)
 img_artist = ax_img.imshow(preview, cmap="gray", vmin=0, vmax=255)
-ax_img.set_title("Ultima imagen recibida")
 ax_img.set_xticks([])
 ax_img.set_yticks([])
+ax_img.set_xlabel("")
+ax_img.xaxis.label.set_visible(False)
 
 status_text = ax_img.text(
     0.02,
@@ -312,14 +380,44 @@ status_text = ax_img.text(
     bbox=dict(facecolor="black", alpha=0.55, edgecolor="none"),
 )
 
-telemetry_state_text = fig.text(0.01, 0.01, "Flujo de sensores: esperando", fontsize=10)
-relay_state_text = fig.text(0.36, 0.01, "Relay: esperando estado", fontsize=10)
+ax_anaglyph = fig.add_subplot(right_gs[1, 0])
+ax_anaglyph.set_facecolor("white")
+ax_anaglyph.set_xticks([])
+ax_anaglyph.set_yticks([])
+for sp in ax_anaglyph.spines.values():
+    sp.set_color("#111111")
+anaglyph_card_text = ax_anaglyph.text(
+    0.03,
+    0.92,
+    "Anaglifo\nGuardadas: 0\nDescartadas: 0\nUltima imagen: --",
+    transform=ax_anaglyph.transAxes,
+    va="top",
+    fontsize=10,
+    color="#111111",
+)
+
+ax_system = fig.add_subplot(right_gs[2, 0])
+ax_system.set_facecolor("white")
+ax_system.set_xticks([])
+ax_system.set_yticks([])
+for sp in ax_system.spines.values():
+    sp.set_color("#111111")
+system_card_text = ax_system.text(
+    0.03,
+    0.92,
+    f"Sistema\nHora: {datetime.now().strftime('%H:%M:%S')}\nSensores: esperando",
+    transform=ax_system.transAxes,
+    va="top",
+    fontsize=10,
+    color="#111111",
+)
 
 current_image: ImageAssembly | None = None
 current_image_last_activity_mono = 0.0
 current_image_begin_mono = 0.0
 binary_image_mode_active = False
 last_sensor_time = 0.0
+last_sensor_timestamp = "--:--:--"
 last_image_time = 0.0
 last_image_latency_ms = 0.0
 saved_images = 0
@@ -719,10 +817,12 @@ def process_text_line(line: str) -> bool:
 
         time_buffer.append(ts_short)
         for i in range(NUM_VARS):
-            data_buffers[i].append(sensor_vals[i])
+            # Column 3 in the UI is repurposed for image latency in field monitoring.
+            data_buffers[i].append(last_image_latency_ms if i == 3 else sensor_vals[i])
 
-        global last_sensor_time
+        global last_sensor_time, last_sensor_timestamp
         last_sensor_time = time.monotonic()
+        last_sensor_timestamp = ts_short
         return True
 
     for frag in split_protocol_fragments(line):
@@ -901,14 +1001,19 @@ def update_plot(_frame: int):
 
     if sensor_updated:
         for i in range(NUM_VARS):
-            lines[i].set_ydata(list(data_buffers[i]))
+            yvals = list(data_buffers[i])
+            lines[i].set_ydata(yvals)
             axes[i].relim()
             axes[i].autoscale_view()
 
-        indices = range(0, MAX_POINTS, max(1, MAX_POINTS // 8))
-        for idx in range(bottom_row_start, min(bottom_row_start + NUM_COLS, NUM_VARS)):
-            axes[idx].set_xticks(indices)
-            axes[idx].set_xticklabels([time_buffer[j] for j in indices], rotation=45, fontsize="x-small")
+            val = yvals[-1]
+            unit = UNITS[i]
+            if unit == "#":
+                value_texts[i].set_text(f"{int(val):d} {unit}")
+            elif abs(val) >= 100:
+                value_texts[i].set_text(f"{val:.1f} {unit}")
+            else:
+                value_texts[i].set_text(f"{val:.2f} {unit}")
 
     now_mono = time.monotonic()
     # Flushing every frame can stall ingestion and cause serial buffer overrun at high rates.
@@ -929,81 +1034,130 @@ def update_plot(_frame: int):
                 f"idle_s={idle:.2f} timeout_s={IMAGE_ASSEMBLY_TIMEOUT_SEC:.2f}"
             )
             status_text.set_text(
-                f"Image dropped (receive timeout {idle:.1f}s, chunks={current_image.next_chunk})"
+                f"Imagen descartada (timeout de recepcion {idle:.1f}s, bloques={current_image.next_chunk})"
             )
             current_image = None
             current_image_last_activity_mono = 0.0
             current_image_begin_mono = 0.0
 
+    # Keep the area under the image frame clean even if previous interactive
+    # runs left a stale xlabel.
+    ax_img.set_xlabel("")
+    ax_img.xaxis.label.set_visible(False)
+
     if last_sensor_time == 0.0:
-        telemetry_state_text.set_text("Flujo de sensores: esperando")
-        telemetry_state_text.set_color("gray")
+        sensor_state = "esperando"
+        sensor_color = "#6b7280"
     else:
         age = now_mono - last_sensor_time
         if age > SENSOR_TIMEOUT_SEC:
-            telemetry_state_text.set_text(f"Flujo de sensores: DETENIDO ({age:.1f}s)")
-            telemetry_state_text.set_color("red")
+            sensor_state = f"DETENIDO ({age:.1f}s)"
+            sensor_color = "#b91c1c"
         else:
-            telemetry_state_text.set_text(f"Flujo de sensores: OK ({age:.2f}s desde el ultimo)")
-            telemetry_state_text.set_color("green")
+            sensor_state = f"LEYENDO ({age:.2f}s)"
+            sensor_color = "#166534"
 
     if last_image_time == 0.0:
-        ax_img.set_xlabel(f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images}")
+        image_age_text = "--"
     else:
         img_age = now_mono - last_image_time
-        ax_img.set_xlabel(
-            f"Imagenes guardadas: {saved_images} | descartadas: {dropped_images} | latencia ult={last_image_latency_ms:.0f} ms | ultima imagen hace {img_age:.1f}s"
-        )
+        image_age_text = f"hace {img_age:.1f}s"
 
-    relay_state_text.set_text(latest_relay_status)
-    relay_state_text.set_color("tab:blue")
+    system_card_text.set_text(
+        "Sistema\n"
+        f"Hora: {last_sensor_timestamp}\n"
+        f"Sensores: {sensor_state}"
+    )
+    system_card_text.set_color(sensor_color)
 
-    return lines + [img_artist, telemetry_state_text, relay_state_text, status_text]
+    anaglyph_card_text.set_text(
+        "Anaglifo\n"
+        f"Guardadas: {saved_images}\n"
+        f"Descartadas: {dropped_images}\n"
+        f"Ultima imagen: {image_age_text}"
+    )
+    anaglyph_card_text.set_color("#111111")
+
+    return lines + value_texts + [img_artist, system_card_text, anaglyph_card_text, status_text]
 
 
 # %%
-print("Panel en ejecucion en la ventana interactiva de VS Code...")
+plt.ion()
 start_serial_reader()
+
+def _safe_update_plot(frame: int):
+    try:
+        return update_plot(frame)
+    except Exception as exc:
+        try:
+            dbg(f"DASHBOARD_UPDATE_ERROR err={exc}")
+            status_text.set_text(f"Error de actualizacion: {exc}")
+        except Exception:
+            pass
+        return lines + value_texts + [img_artist, system_card_text, anaglyph_card_text, status_text]
+
 ani = animation.FuncAnimation(
     fig,
-    update_plot,
-    interval=20,
+    _safe_update_plot,
+    interval=50,
     blit=False,
     cache_frame_data=False,
 )
 
-plt.show()
+# Keep handles so subsequent runs can close/replace cleanly.
+_dashboard_fig = fig
+_dashboard_ani = ani
+_dashboard_is_running = True
 
-# %%
-# Optional cleanup cell: run this when you want to stop cleanly.
 try:
-    stop_serial_reader()
+    ani.event_source.start()
 except Exception:
     pass
 
-try:
-    sensor_log_file.flush()
-    sensor_log_file.close()
-except Exception:
-    pass
 
-try:
-    debug_log_file.flush()
-    debug_log_file.close()
-except Exception:
-    pass
+def stop_dashboard():
+    """Stop the dashboard cleanly. Call this from the interactive window prompt."""
+    try:
+        prev_ani = globals().get("_dashboard_ani")
+        if prev_ani is not None:
+            prev_ani.event_source.stop()
+    except Exception:
+        pass
 
-try:
-    raw_serial_log_file.flush()
-    raw_serial_log_file.close()
-except Exception:
-    pass
+    try:
+        prev_timer = globals().get("_dashboard_timer")
+        if prev_timer is not None:
+            prev_timer.stop()
+    except Exception:
+        pass
 
-try:
-    ser.close()
-except Exception:
-    pass
+    try:
+        stop_serial_reader()
+    except Exception:
+        pass
 
-print("Panel detenido.")
+    try:
+        sensor_log_file.flush()
+        sensor_log_file.close()
+    except Exception:
+        pass
 
-# %%
+    try:
+        debug_log_file.flush()
+        debug_log_file.close()
+    except Exception:
+        pass
+
+    try:
+        raw_serial_log_file.flush()
+        raw_serial_log_file.close()
+    except Exception:
+        pass
+
+    try:
+        ser.close()
+    except Exception:
+        pass
+
+    globals()["_dashboard_is_running"] = False
+    print("✓ Dashboard detenido.")

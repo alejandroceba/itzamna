@@ -22,11 +22,14 @@ static const uint8_t PKT_END = 3;
 static const uint8_t PKT_ACK = 4;
 static const uint16_t IMG_MAX_CHUNK_PAYLOAD = 200;
 static const uint32_t IMG_MAX_IMAGE_BYTES = 300000;   // supports QVGA RGB anaglyph payloads
-static const uint16_t IMG_SERIAL_CHUNK_BYTES = 96;    // first latency step: larger chunks reduce serial overhead
-static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 2; // second latency step: reduce per-chunk wait while keeping chunk size unchanged
+static const uint16_t IMG_SERIAL_CHUNK_BYTES = 160;    // faster emit: fewer IMG_CHUNK lines per image
+static const uint8_t IMG_SERIAL_CHUNK_INTERVAL_MS = 1; // faster emit cadence to shrink emit-active window
 static const uint8_t IMG_SERIAL_CHUNK_DUPLICATES = 1;  // one line per chunk keeps logs readable while preserving sequence debug
 static const uint8_t IMG_SERIAL_BEGIN_REPEATS = 1;     // one begin line is enough with current parser/transport
 static const uint16_t IMG_SERIAL_CHUNK_LINE_STRIDE = 1; // test mode: emit every chunk line so dashboard can fully reconstruct image
+static const uint32_t IMG_RX_STALL_TIMEOUT_MS = 2500;
+static const uint32_t IMG_EMIT_STALL_TIMEOUT_MS = 2500;
+static const uint16_t IMG_DBG_CHUNK_WITHOUT_BEGIN_LOG_EVERY = 200;
 static const uint8_t SERIAL_IMG_SOF1 = 0xA5;
 static const uint8_t SERIAL_IMG_SOF2 = 0x5A;
 static const uint8_t SERIAL_IMG_FRAME_BEGIN = 1;
@@ -146,6 +149,9 @@ volatile uint32_t g_imgEndBytes = 0;
 
 volatile uint32_t g_imgOkImages = 0;
 volatile uint32_t g_imgBadPackets = 0;
+volatile uint32_t g_imgLastRxMs = 0;
+volatile uint32_t g_imgLastEmitProgressMs = 0;
+volatile uint32_t g_imgChunkWithoutBeginCount = 0;
 
 // ============================================================================
 // SOURCE MAC ROUTING (different XIAOs for sensor and image)
@@ -231,6 +237,7 @@ void resetImageRxStateNoFree() {
   g_imgChunkPayload = 0;
   g_imgExpectedChunk = 0;
   g_imgReceivedBytes = 0;
+  g_imgLastRxMs = 0;
 }
 
 void freeImageBufferIfAny() {
@@ -472,6 +479,7 @@ void handleImagePacket(const uint8_t *data, int len) {
     g_imgChunkPayload = b.chunkPayload;
     g_imgExpectedChunk = 0;
     g_imgReceivedBytes = 0;
+    g_imgLastRxMs = millis();
 
     // Emit IMG_BEGIN as soon as the first valid image packet is accepted.
     // This gives downstream tools an earlier, more useful start timestamp.
@@ -491,7 +499,12 @@ void handleImagePacket(const uint8_t *data, int len) {
 
     if (!g_imgReceiving || g_imgBuffer == nullptr) {
       g_imgBadPackets++;
-      IMG_DBG("IMG_DBG chunk_without_begin len=%d\n", len);
+      g_imgChunkWithoutBeginCount++;
+      if ((g_imgChunkWithoutBeginCount % IMG_DBG_CHUNK_WITHOUT_BEGIN_LOG_EVERY) == 1) {
+        IMG_DBG("IMG_DBG chunk_without_begin len=%d count=%lu\n",
+                len,
+                (unsigned long)g_imgChunkWithoutBeginCount);
+      }
       return;
     }
 
@@ -551,6 +564,7 @@ void handleImagePacket(const uint8_t *data, int len) {
     memcpy(g_imgBuffer + g_imgReceivedBytes, &data[7], n);
     g_imgReceivedBytes += n;
     g_imgExpectedChunk++;
+    g_imgLastRxMs = millis();
     return;
   }
 
@@ -613,6 +627,7 @@ void handleImagePacket(const uint8_t *data, int len) {
     g_imgEmitActive = false;
     g_imgEmitOffset = 0;
     g_imgEmitChunkIndex = 0;
+    g_imgLastRxMs = millis();
     resetImageRxStateNoFree();
     return;
   }
@@ -769,9 +784,17 @@ void loop() {
   }
 
   // 1) Drain sensor queue first to keep telemetry continuous.
+  bool imagePipelineBusy = false;
+  portENTER_CRITICAL(&g_mux);
+  imagePipelineBusy = g_imgEmitActive || g_imgReadyToEmit || g_imgReceiving;
+  portEXIT_CRITICAL(&g_mux);
+
+  // Keep telemetry flowing, but do not let it starve image emission.
+  uint16_t sensorBudget = imagePipelineBusy ? 40 : 200;
+
   SensorQueueItem sItem;
   uint16_t processedSensors = 0;
-  while (processedSensors < 200) {
+  while (processedSensors < sensorBudget) {
     portENTER_CRITICAL(&g_mux);
     bool hasSensor = dequeueSensor(sItem);
     portEXIT_CRITICAL(&g_mux);
@@ -905,6 +928,7 @@ void loop() {
     portEXIT_CRITICAL(&g_mux);
 
     nextChunkEmitMs = millis() + IMG_SERIAL_CHUNK_INTERVAL_MS;
+    g_imgLastEmitProgressMs = millis();
         IMG_DBG("IMG_DBG emit_begin id=%u w=%u h=%u len=%lu\n",
           (unsigned)id,
           (unsigned)w,
@@ -955,6 +979,7 @@ void loop() {
       portENTER_CRITICAL(&g_mux);
       g_imgEmitOffset += n;
       g_imgEmitChunkIndex++;
+      g_imgLastEmitProgressMs = millis();
       portEXIT_CRITICAL(&g_mux);
     }
 
@@ -993,6 +1018,37 @@ void loop() {
   // 4) Periodic status
   static uint32_t lastStatus = 0;
   uint32_t now = millis();
+
+  if (g_imgReceiving && g_imgLastRxMs > 0 && (now - g_imgLastRxMs) > IMG_RX_STALL_TIMEOUT_MS) {
+    Serial.printf("RECEIVER_IMG_DROP reason=rx_timeout id=%u recv=%lu total=%lu\n",
+                  (unsigned)g_imgImageId,
+                  (unsigned long)g_imgReceivedBytes,
+                  (unsigned long)g_imgDataLen);
+    IMG_DBG("IMG_DBG image_timeout id=%u recv=%lu total=%lu\n",
+            (unsigned)g_imgImageId,
+            (unsigned long)g_imgReceivedBytes,
+            (unsigned long)g_imgDataLen);
+    abortImageRx(0);
+  }
+
+  if (g_imgEmitActive && g_imgLastEmitProgressMs > 0 && (now - g_imgLastEmitProgressMs) > IMG_EMIT_STALL_TIMEOUT_MS) {
+    Serial.printf("RECEIVER_IMG_DROP reason=emit_stall id=%u offset=%lu total=%lu\n",
+                  (unsigned)g_imgEmitImageId,
+                  (unsigned long)g_imgEmitOffset,
+                  (unsigned long)g_imgEmitDataLen);
+    g_imgEmitActive = false;
+    g_imgReadyToEmit = false;
+    g_imgEmitOffset = 0;
+    g_imgEmitChunkIndex = 0;
+    g_imgEmitImageId = 0;
+    g_imgEmitWidth = 0;
+    g_imgEmitHeight = 0;
+    g_imgEmitDataLen = 0;
+    g_imgLastEmitProgressMs = 0;
+    freeImageBufferIfAny();
+    resetImageRxStateNoFree();
+  }
+
   bool serialImageBusy;
   portENTER_CRITICAL(&g_mux);
   serialImageBusy = g_imgEmitActive || g_imgReadyToEmit || g_imgReceiving;
