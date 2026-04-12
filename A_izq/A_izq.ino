@@ -7,6 +7,11 @@ static const int TX_PIN  = D6;
 static const int RX_PIN  = D7;
 static const uint32_t BAUD = 921600;
 
+// Capture mode:
+// true  = keep capturing/sending continuously
+// false = capture only on button press
+static const bool CONTINUOUS_CAPTURE_MODE = true;
+
 // Protocolo
 static const uint16_t MAGIC = 0xA55A;
 static const uint8_t READY_BYTE     = 0x52; // 'R'
@@ -104,7 +109,7 @@ bool initCamera() {
   c.pixel_format = PIXFORMAT_RGB565;
 
   // Keep left camera resolution aligned with DER to avoid header mismatch.
-  c.frame_size   = FRAMESIZE_QQVGA;
+  c.frame_size   = FRAMESIZE_HQVGA;
   //c.jpeg_quality = 20;
   c.fb_count     = 1;
 
@@ -112,7 +117,7 @@ bool initCamera() {
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-  c.frame_size  = FRAMESIZE_QQVGA;
+  c.frame_size  = FRAMESIZE_HQVGA;
   c.fb_location = CAMERA_FB_IN_DRAM;
 }
 
@@ -208,6 +213,7 @@ bool sendFrameChunked(camera_fb_t *fb) {
 void setup() {
   Serial.begin(115200);
   delay(800);
+  Serial.printf("[IZQ] continuous_mode=%u\n", (unsigned)CONTINUOUS_CAPTURE_MODE);
 
   pinMode(BTN_PIN, INPUT_PULLUP);
 
@@ -224,7 +230,7 @@ void setup() {
 
 void loop() {
   if (g_busy) return;
-  if (!buttonPressed()) return;
+  if (!CONTINUOUS_CAPTURE_MODE && !buttonPressed()) return;
 
   g_busy = true;
   while (Link.available()) Link.read();
@@ -234,7 +240,7 @@ void loop() {
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("[IZQ] Error capturando imagen");
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
     g_busy = false;
     return;
   }
@@ -245,7 +251,7 @@ void loop() {
   if (!waitByte(READY_BYTE, 8000)) {
     Serial.println("[IZQ] No llegó READY");
     esp_camera_fb_return(fb);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
     g_busy = false;
     return;
   }
@@ -255,7 +261,7 @@ void loop() {
   if (!sendFrameChunked(fb)) {
     Serial.println("[IZQ] Error enviando imagen");
     esp_camera_fb_return(fb);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
     g_busy = false;
     return;
   }
@@ -270,6 +276,6 @@ void loop() {
     Serial.println("[IZQ] No llegó ACK final");
   }
 
-  waitButtonRelease();
+  if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
   g_busy = false;
 }

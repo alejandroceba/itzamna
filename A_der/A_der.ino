@@ -152,14 +152,14 @@ bool initCamera() {
   c.xclk_freq_hz = 10000000;
   c.pixel_format = PIXFORMAT_RGB565;
 
-  c.frame_size   = FRAMESIZE_QVGA;
+  c.frame_size   = FRAMESIZE_HQVGA;
   c.fb_count     = 1;
 
   c.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-    c.frame_size  = FRAMESIZE_QQVGA;
+    c.frame_size  = FRAMESIZE_HQVGA;
     c.fb_location = CAMERA_FB_IN_DRAM;
   }
 

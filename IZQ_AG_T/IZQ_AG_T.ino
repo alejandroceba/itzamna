@@ -107,7 +107,7 @@ bool initCamera() {
   c.pixel_format = PIXFORMAT_RGB565;
 
   // Keep left camera resolution aligned with DER to avoid header mismatch.
-  c.frame_size   = FRAMESIZE_QQVGA;
+  c.frame_size   = FRAMESIZE_HQVGA;
   c.jpeg_quality = 10;
   c.fb_count     = 1;
 
@@ -115,7 +115,7 @@ bool initCamera() {
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-    c.frame_size  = FRAMESIZE_QQVGA;
+    c.frame_size  = FRAMESIZE_HQVGA;
     c.fb_location = CAMERA_FB_IN_DRAM;
   }
 

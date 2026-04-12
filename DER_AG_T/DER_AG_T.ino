@@ -20,6 +20,21 @@ static const uint16_t IMAGE_CHUNK_PAYLOAD = 200;
 static const uint8_t IMAGE_SEND_GAP_MS = 4;
 static const uint8_t IMAGE_SEND_MAX_RETRIES = 12;
 
+// Capture mode:
+// true  = keep capturing/sending continuously
+// false = capture only on button press
+static const bool CONTINUOUS_CAPTURE_MODE = true;
+static const uint16_t CONTINUOUS_GUARD_DELAY_MS = 1800;
+
+// Redundancy mode:
+// true  = send second redundant copy
+// false = send only one anaglyph per trigger
+static const bool ENABLE_REDUNDANCY = false;
+
+// Redundancy timing mode for second anaglyph send:
+// 0 = fixed 1500 ms, 1 = fixed 1000 ms, 2 = adaptive
+static const uint8_t REDUNDANCY_DELAY_MODE = 0;
+
 // TODO(INTEGRATION): when Sender MAC is known, set IMAGE_SEND_BROADCAST=false
 // and replace SENDER_MAC with the real unicast target.
 // Keep broadcast only for initial bring-up.
@@ -82,6 +97,7 @@ HardwareSerial Link(1);
 static bool g_busy = false;
 static uint16_t g_imageId = 1;
 static uint8_t g_senderPeerAddr[6] = {0};
+static uint8_t *g_leftImageData = nullptr;
 
 // ================= HELPERS BINARIOS =================
 static uint16_t read_u16_le(const uint8_t *p) {
@@ -177,7 +193,7 @@ bool initCamera() {
   c.xclk_freq_hz = 10000000;
   c.pixel_format = PIXFORMAT_RGB565;
 
-  c.frame_size   = FRAMESIZE_QQVGA;
+  c.frame_size   = FRAMESIZE_HQVGA;
   c.jpeg_quality = 20;
   c.fb_count     = 1;
 
@@ -185,7 +201,7 @@ bool initCamera() {
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-    c.frame_size   = FRAMESIZE_QQVGA;
+    c.frame_size   = FRAMESIZE_HQVGA;
     c.fb_location  = CAMERA_FB_IN_DRAM;
   }
 
@@ -310,6 +326,25 @@ bool sendImageEnd(uint16_t imageId, uint16_t totalChunks, uint32_t dataLen) {
   return sendEspNowPacket((const uint8_t *)&e, sizeof(e));
 }
 
+uint16_t computeRedundancyDelayMs(uint32_t firstSendElapsedMs) {
+  if (REDUNDANCY_DELAY_MODE == 0) {
+    return 2300;
+  }
+  if (REDUNDANCY_DELAY_MODE == 1) {
+    return 1700;
+  }
+
+  // Adaptive mode: keep delay in a conservative/stable region for HQVGA payloads.
+  uint32_t adaptiveMs = firstSendElapsedMs + 600;
+  if (adaptiveMs < 2300) {
+    adaptiveMs = 2300;
+  }
+  if (adaptiveMs > 3200) {
+    adaptiveMs = 3200;
+  }
+  return (uint16_t)adaptiveMs;
+}
+
 bool buildGrayBufferFromFrame(camera_fb_t *fb, uint8_t **outGray) {
   if (!fb || !outGray) return false;
 
@@ -350,6 +385,8 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
   }
 
   uint32_t anaglyphLen = (uint32_t)width * height * 2;
+  uint32_t firstSendStartMs = millis();
+  uint32_t firstSendElapsedMs = 0;
 
   bool espOk = true;
   if (!sendImageBegin(imageId, width, height, anaglyphLen)) {
@@ -359,6 +396,16 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
 
   Link.write(ACK_HDR_BYTE);
   Link.flush();
+
+  // Allocate buffer to store left RGB565 data for redundant sending
+  if (g_leftImageData) {
+    free(g_leftImageData);
+  }
+  g_leftImageData = (uint8_t *)malloc(totalLen);
+  if (!g_leftImageData) {
+    Serial.println("[DER] Fallo en malloc para leftImageData");
+    return false;
+  }
 
   uint32_t received = 0;
   uint32_t pixelIndex = 0;
@@ -371,25 +418,44 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     uint8_t lenBuf[2];
     if (!readExact(lenBuf, 2, 4000)) {
       Serial.println("[DER] Timeout leyendo tamaño de bloque");
+      if (g_leftImageData) {
+        free(g_leftImageData);
+        g_leftImageData = nullptr;
+      }
       return false;
     }
 
     uint16_t n = read_u16_le(lenBuf);
     if (n == 0 || n > CHUNK_SIZE || (received + n) > totalLen) {
       Serial.printf("[DER] Bloque inválido: %u\n", n);
+      if (g_leftImageData) {
+        free(g_leftImageData);
+        g_leftImageData = nullptr;
+      }
       return false;
     }
 
     if (n % 2 != 0) {
       Serial.println("[DER] Bloque RGB565 impar");
+      if (g_leftImageData) {
+        free(g_leftImageData);
+        g_leftImageData = nullptr;
+      }
       return false;
     }
 
     uint8_t buf[CHUNK_SIZE];
     if (!readExact(buf, n, 4000)) {
       Serial.println("[DER] Timeout leyendo bloque");
+      if (g_leftImageData) {
+        free(g_leftImageData);
+        g_leftImageData = nullptr;
+      }
       return false;
     }
+
+    // Store left image RGB565 data for redundant sending
+    memcpy(&g_leftImageData[received], buf, n);
 
     for (uint16_t i = 0; i < n; i += 2) {
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
@@ -427,6 +493,10 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     Serial.printf("[DER] Mismatch bytes anaglifo: enviados=%lu esperados=%lu\n",
                   (unsigned long)sentAnaglyphBytes,
                   (unsigned long)anaglyphLen);
+    if (g_leftImageData) {
+      free(g_leftImageData);
+      g_leftImageData = nullptr;
+    }
     return false;
   }
 
@@ -434,6 +504,79 @@ bool receiveLeftAndSendAnaglyphUART(uint16_t imageId,
     if (!sendImageEnd(imageId, chunkIndex, anaglyphLen)) {
       espOk = false;
     }
+  }
+  firstSendElapsedMs = millis() - firstSendStartMs;
+
+  // Redundancy: send same anaglyph a second time with imageId+1
+  if (ENABLE_REDUNDANCY && espOk && g_leftImageData) {
+    uint16_t redundancyDelayMs = computeRedundancyDelayMs(firstSendElapsedMs);
+    Serial.printf("[DER] Delay redundancia mode=%u delay=%u ms first_send=%lu ms\n",
+                  (unsigned)REDUNDANCY_DELAY_MODE,
+                  (unsigned)redundancyDelayMs,
+                  (unsigned long)firstSendElapsedMs);
+    delay(redundancyDelayMs);
+    
+    uint16_t imageId2 = imageId + 1;
+    Serial.printf("[DER] Enviando anaglifo redundante con imageId=%u\n", imageId2);
+    
+    if (!sendImageBegin(imageId2, width, height, anaglyphLen)) {
+      Serial.println("[DER] No se pudo enviar PKT_BEGIN de anaglifo redundante");
+      espOk = false;
+    } else {
+      pixelIndex = 0;
+      imgPayloadLen = 0;
+      chunkIndex = 0;
+      sentAnaglyphBytes = 0;
+      uint32_t leftDataPos = 0;
+      
+      while (leftDataPos < totalLen) {
+        uint16_t n = (leftDataPos + CHUNK_SIZE <= totalLen) ? CHUNK_SIZE : (uint16_t)(totalLen - leftDataPos);
+        
+        for (uint16_t i = 0; i < n; i += 2) {
+          uint16_t p = ((uint16_t)g_leftImageData[leftDataPos + i] << 8) | g_leftImageData[leftDataPos + i + 1];
+          uint8_t leftGray = rgb565ToGray(p);
+          uint8_t rightG = rightGray[pixelIndex++];
+          uint16_t anaPix = packAnaglyphRGB565(leftGray, rightG);
+          
+          if (imgPayloadLen > (IMAGE_CHUNK_PAYLOAD - 2)) {
+            if (!sendImageChunk(imageId2, chunkIndex, imgPayload, imgPayloadLen)) {
+              espOk = false;
+            }
+            sentAnaglyphBytes += imgPayloadLen;
+            chunkIndex++;
+            imgPayloadLen = 0;
+          }
+          
+          imgPayload[imgPayloadLen++] = (uint8_t)((anaPix >> 8) & 0xFF);
+          imgPayload[imgPayloadLen++] = (uint8_t)(anaPix & 0xFF);
+        }
+        
+        leftDataPos += n;
+      }
+      
+      if (espOk && imgPayloadLen > 0) {
+        if (!sendImageChunk(imageId2, chunkIndex, imgPayload, imgPayloadLen)) {
+          espOk = false;
+        }
+        sentAnaglyphBytes += imgPayloadLen;
+        chunkIndex++;
+      }
+      
+      if (espOk) {
+        if (!sendImageEnd(imageId2, chunkIndex, anaglyphLen)) {
+          espOk = false;
+        }
+      }
+      
+      if (espOk) {
+        Serial.printf("[DER] Anaglifo redundante enviado exitosamente\n");
+      }
+    }
+  }
+
+  if (g_leftImageData) {
+    free(g_leftImageData);
+    g_leftImageData = nullptr;
   }
 
   return espOk;
@@ -745,6 +888,9 @@ void setup() {
   Serial.begin(115200);
   delay(800);
   Serial.printf("[DER] PROTO %s\n", PROTO_VERSION);
+  Serial.printf("[DER] continuous_mode=%u redundancy=%u\n",
+                (unsigned)CONTINUOUS_CAPTURE_MODE,
+                (unsigned)ENABLE_REDUNDANCY);
 
   pinMode(BTN_PIN, INPUT_PULLUP);
   Link.setRxBufferSize(4096);
@@ -766,7 +912,7 @@ void setup() {
 // ================= LOOP =================
 void loop() {
   if (g_busy) return;
-  if (!buttonPressed()) return;
+  if (!CONTINUOUS_CAPTURE_MODE && !buttonPressed()) return;
 
   g_busy = true;
   while (Link.available()) Link.read();
@@ -779,7 +925,8 @@ void loop() {
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("[DER] Error capturando imagen derecha");
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -791,7 +938,8 @@ void loop() {
   if (!buildGrayBufferFromFrame(fb, &rightGray)) {
     Serial.println("[DER] Error construyendo rightGray");
     esp_camera_fb_return(fb);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -810,7 +958,8 @@ void loop() {
     Serial.println("[DER] Timeout leyendo header");
     free(rightGray);
     Link.write(ERR_BYTE);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -824,7 +973,8 @@ void loop() {
     Serial.printf("[DER] BAD MAGIC 0x%04X\n", magic);
     free(rightGray);
     Link.write(ERR_BYTE);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -836,7 +986,8 @@ void loop() {
     Serial.println("[DER] Dimensiones izquierda/derecha no coinciden");
     free(rightGray);
     Link.write(ERR_BYTE);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -845,7 +996,8 @@ void loop() {
     Serial.println("[DER] Error generando/enviando anaglifo por ESP-NOW");
     free(rightGray);
     Link.write(ERR_BYTE);
-    waitButtonRelease();
+    if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+    if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
     g_busy = false;
     return;
   }
@@ -863,6 +1015,7 @@ void loop() {
               elapsed / 1000.0f);
   Serial.println("[DER] Recepción y envío completados");
 
-  waitButtonRelease();
+  if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
+  if (CONTINUOUS_CAPTURE_MODE) delay(CONTINUOUS_GUARD_DELAY_MS);
   g_busy = false;
 }
