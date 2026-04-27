@@ -800,7 +800,7 @@ bool receiveLeftAndSendAnaglyph(uint16_t imageId,
     }
 
     uint8_t lenBuf[2];
-    if (!readExact(lenBuf, 2, 4000)) {
+    if (!readExact(lenBuf, 2, 10000)) {
       Serial.println("[DER] Timeout leyendo tamaño de bloque");
       return false;
     }
@@ -818,14 +818,19 @@ bool receiveLeftAndSendAnaglyph(uint16_t imageId,
     }
 
     uint8_t buf[CHUNK_SIZE];
-    if (!readExact(buf, n, 4000)) {
+    if (!readExact(buf, n, 10000)) {
       Serial.println("[DER] Timeout leyendo bloque");
       return false;
     }
 
+    size_t pixelCount = n / 2;
+    uint8_t leftChunk[CHUNK_SIZE / 2];
+    uint8_t anaChunk[(CHUNK_SIZE / 2) * 3];
+
     for (uint16_t i = 0; i < n; i += 2) {
       uint16_t p = ((uint16_t)buf[i] << 8) | buf[i + 1];
       uint8_t leftGray = rgb565ToGray(p);
+      size_t outIndex = i / 2;
 
       // Ensure room for a full RGB triplet. IMAGE_CHUNK_PAYLOAD (200) is not
       // divisible by 3, so flush when less than 3 bytes remain.
@@ -963,8 +968,8 @@ void loop() {
   Serial.println("[DER] READY enviado, esperando header...");
 
   uint8_t hdr[10];
-  if (!readExact(hdr, sizeof(hdr), 8000)) {
-    Serial.println("[DER] Timeout leyendo header");
+  if (!readExact(hdr, sizeof(hdr), 15000)) {
+    Serial.println("[DER] Timeout esperando header de IZQ");
     free(rightGray);
     Link.write(ERR_BYTE);
     if (!CONTINUOUS_CAPTURE_MODE) waitButtonRelease();
