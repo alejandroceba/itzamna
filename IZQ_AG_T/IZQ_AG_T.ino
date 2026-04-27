@@ -8,7 +8,6 @@ static const int RX_PIN  = D7;
 //static const uint32_t BAUD = 921600;
 static const uint32_t BAUD = 115200;
 
-
 // Protocolo
 static const uint16_t MAGIC = 0xA55A;
 static const uint16_t CHUNK_MARKER = 0xCAFE;
@@ -107,8 +106,8 @@ bool initCamera() {
   //c.pixel_format = PIXFORMAT_JPEG;
   c.pixel_format = PIXFORMAT_RGB565;
 
-  // Para depurar transferencia, VGA es más seguro que SVGA
-  c.frame_size   = FRAMESIZE_QVGA;
+  // Keep left camera resolution aligned with DER to avoid header mismatch.
+  c.frame_size   = FRAMESIZE_HQVGA;
   c.jpeg_quality = 10;
   c.fb_count     = 1;
 
@@ -116,7 +115,7 @@ bool initCamera() {
   c.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (!psramFound()) {
-    c.frame_size  = FRAMESIZE_QVGA;
+    c.frame_size  = FRAMESIZE_HQVGA;
     c.fb_location = CAMERA_FB_IN_DRAM;
   }
 
