@@ -53,7 +53,6 @@ typedef struct {
   uint32_t packetNumber;
   uint32_t senderTimestamp;
   float temperature_bme280;
-  float temperature_ds18b20;
   float pressure_hpa;
   float altitude_m;
   float velocity_x;
@@ -757,7 +756,6 @@ void setup() {
     "lossRate_pct,"
     "throughput_kbps,"
     "temp_bme280_C,"
-    "temp_ds18b20_C,"
     "pressure_hpa,"
     "altitude_m,"
     "velocity_x_ms,"
@@ -837,7 +835,6 @@ void loop() {
       Serial.print(lossRate, 4); Serial.print(",");
       Serial.print(throughput, 4); Serial.print(",");
       Serial.print(sItem.pkt.temperature_bme280, 4); Serial.print(",");
-      Serial.print(sItem.pkt.temperature_ds18b20, 4); Serial.print(",");
       Serial.print(sItem.pkt.pressure_hpa, 4); Serial.print(",");
       Serial.print(sItem.pkt.altitude_m, 4); Serial.print(",");
       Serial.print(sItem.pkt.velocity_x, 4); Serial.print(",");
