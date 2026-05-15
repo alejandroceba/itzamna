@@ -40,7 +40,9 @@ static const uint8_t REDUNDANCY_DELAY_MODE = 0;
 // Keep broadcast only for initial bring-up.
 static const bool IMAGE_SEND_BROADCAST = false;
 //static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0x8b, 0x8a, 0x34};
-static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0xac, 0xaf, 0x4c};
+//static uint8_t SENDER_MAC[6] = {0x34, 0x85, 0x18, 0xac, 0xaf, 0x4c};
+static uint8_t SENDER_MAC[6] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};
+
 //d8:3b:da:46:57:84
 //34:85:18:ac:af:4c
 // Protocolo

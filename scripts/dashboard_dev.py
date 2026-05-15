@@ -37,7 +37,6 @@ LABELS = [
     "Tasa de Perdida",
     "Rendimiento",
     "Temp BME280",
-    "Temp DS18B20",
     "Presion",
     "Altitud",
     "Velocidad X",
@@ -54,7 +53,6 @@ UNITS = [
     "ms",
     "%",
     "kbps",
-    "degC",
     "degC",
     "hPa",
     "m",
@@ -257,9 +255,8 @@ def append_latency_markdown(image_id: int, width: int, height: int, chunks: int,
 time_buffer = deque([""] * MAX_POINTS, maxlen=MAX_POINTS)
 initial_values = [0.0] * NUM_VARS
 initial_values[6] = 25.0   # Temp BME280
-initial_values[7] = 25.0   # Temp DS18B20
-initial_values[8] = 800.0  # Presion
-initial_values[9] = 1200.0 # Altitud
+initial_values[7] = 800.0  # Presion
+initial_values[8] = 1200.0 # Altitud
 data_buffers = [deque([initial_values[i]] * MAX_POINTS, maxlen=MAX_POINTS) for i in range(NUM_VARS)]
 
 # Re-running this cell in VS Code Interactive can leave a previous widget alive.

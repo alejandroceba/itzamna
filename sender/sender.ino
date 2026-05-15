@@ -13,7 +13,6 @@
 #include <esp_wifi.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
-#include <DallasTemperature.h>
 #include <DFRobot_BMI160.h>
 
 #include <string.h>
@@ -28,13 +27,11 @@
 // ============================================================================
 #define WIFI_CHANNEL 6
 //uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x46, 0x57, 0x84};  // Receiver MAC address
-uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC addressd8:3b:da:45:cd:24
+//uint8_t receiverMAC[] = {0xd8, 0x3b, 0xda, 0x45, 0xcd, 0x24};    // receiver MAC addressd8:3b:da:45:cd:24
+uint8_t receiverMAC[] = {0xe0, 0x72, 0xa1, 0xf8, 0xf4, 0x90};
 // ============================================================================
 // SENSOR PIN CONFIGURATION
 // ============================================================================
-// DS18B20 (OneWire temperature sensor)
-#define DS18_PIN 4
-
 // BMI160 (I2C accelerometer/gyroscope)
 #define SDA_PIN 5
 #define SCL_PIN 6
@@ -72,8 +69,6 @@ const unsigned long IMG_FORWARD_MIN_GAP_MS_FAST = 0;
 // SENSOR OBJECT INSTANTIATION
 // ============================================================================
 Adafruit_BME280 bme;  // SPI mode
-OneWire oneWire(DS18_PIN);
-DallasTemperature ds18b20(&oneWire);
 DFRobot_BMI160 bmi;
 
 //const int8_t BMI160_I2C_ADDR = 0x68;
@@ -86,9 +81,8 @@ typedef struct {
   uint32_t packetNumber;            // Incremental packet counter
   uint32_t senderTimestamp;         // milliseconds since startup
   
-  // --- Temperature (Two Independent Sensors) ---
+  // --- Temperature and pressure ---
   float temperature_bme280;         // BME280 temperature in °C
-  float temperature_ds18b20;        // DS18B20 temperature in °C
   
   // --- Barometric Data ---
   float pressure_hpa;               // BME280 pressure in hPa
@@ -539,8 +533,6 @@ void initializeSensors() {
   }
   Serial.println("BME280 initialized");
 
-  ds18b20.begin();
-  if (DEBUG) Serial.println("DS18B20 initialized");
 }
 
 // ============================================================================
@@ -580,9 +572,6 @@ void readAllSensors() {
   sensorData.pressure_hpa = (bme.readPressure() / 100.0f) - 74.0f;
   sensorData.altitude_m = bme.readAltitude(1013.25f);
 
-  ds18b20.requestTemperatures();
-  sensorData.temperature_ds18b20 = ds18b20.getTempCByIndex(0);
-
   if (bmi.getAccelGyroData(rawSensorData) == BMI160_OK) {
     current_accel_x = ((float)rawSensorData[3] / ACCEL_SCALE) * 9.81f;
     current_accel_y = ((float)rawSensorData[4] / ACCEL_SCALE) * 9.81f;
@@ -602,7 +591,6 @@ void readAllSensors() {
 #endif
 
   sensorData.temperature_bme280 = 25.0f + random(0, 500) / 100.0f;
-  sensorData.temperature_ds18b20 = 25.0f + random(0, 500) / 100.0f;
   sensorData.pressure_hpa = 804.0f + random(0, 600) / 100.0f;
   sensorData.altitude_m = 1170.0f + random(0, 300) / 100.0f;
 
@@ -711,7 +699,6 @@ void printDebugHeader() {
     "packetNum,"
     "timestamp_ms,"
     "temp_bme280_C,"
-    "temp_ds18b20_C,"
     "pressure_hpa,"
     "altitude_m,"
     "velocity_x_ms,"
@@ -731,7 +718,6 @@ void printDebugData() {
   Serial.print(sensorData.packetNumber); Serial.print(",");
   Serial.print(sensorData.senderTimestamp); Serial.print(",");
   Serial.print(sensorData.temperature_bme280, 4); Serial.print(",");
-  Serial.print(sensorData.temperature_ds18b20, 4); Serial.print(",");
   Serial.print(sensorData.pressure_hpa, 4); Serial.print(",");
   Serial.print(sensorData.altitude_m, 4); Serial.print(",");
   Serial.print(sensorData.velocity_x, 4); Serial.print(",");
