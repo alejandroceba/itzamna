@@ -4,9 +4,9 @@
 #include <Adafruit_BME280.h>
 
 TaskHandle_t Task1 = NULL;
-TaskHandle_t Task2 = NULL;
 
 const int servoPin = D1;
+const int readPin = D2;
 Servo servo;
 
 // BME280
@@ -42,34 +42,32 @@ float promedio(float *buffer) {
 }
 
 void Task1code(void *pvParameters) {
-  Serial.print("Task1 (servo sweep) running on core ");
+  Serial.print("Task1 (servo PWM reader) running on core ");
   Serial.println(xPortGetCoreID());
 
-  // Servo is attached in setup() to avoid attach-time stalls on this board.
-
-  // Continuous sweep: 0 -> 180 -> 0
-  const int stepDelayMs = 15; // delay between degree steps for smooth motion
   for (;;) {
-    for (int angle = 0; angle <= 180; ++angle) {
+    long duration = pulseIn(readPin, HIGH);
+
+    if (duration > 500 && duration < 2500) {
+      int angle = map(duration, 500, 2500, 0, 180);
       servo.write(angle);
-      vTaskDelay(pdMS_TO_TICKS(stepDelayMs));
+
+      Serial.print("Input Pulse: ");
+      Serial.print(duration);
+      Serial.print(" | Set Angle: ");
+      Serial.println(angle);
     }
-    for (int angle = 180; angle >= 0; --angle) {
-      servo.write(angle);
-      vTaskDelay(pdMS_TO_TICKS(stepDelayMs));
-    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
-
-// Task2 removed — LED blink moved to loop()
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("Dual-task servo sweep example starting");
+  Serial.println("Dual-task servo + sensor example starting");
 
-  // Prepare built-in LED for blinking in loop()
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(readPin, INPUT);
 
   // Attach servo here (setup runs on core 1 and attach proved reliable)
   Serial.println("Setup: allocating PWM timer and attaching servo");
@@ -126,7 +124,6 @@ void setup() {
 }
 
 void loop() {
-  // Read altitude every TIEMPO_MUESTREO ms
   unsigned long t_actual = millis();
   if (t_actual - t_anterior >= TIEMPO_MUESTREO) {
     t_anterior = t_actual;
@@ -134,7 +131,7 @@ void loop() {
     if (bmeOk) {
       altitude = bme.readAltitude(1013.25f);
     }
-    // Read and compute RPM
+
     noInterrupts();
     unsigned long c1 = pulsos1;
     pulsos1 = 0;
@@ -145,10 +142,13 @@ void loop() {
     indice++;
     if (indice >= N_PROMEDIO) indice = 0;
     float rpm1_suave = promedio(buffer1);
+
     Serial.print("Tiempo(ms):"); Serial.print(t_actual);
     Serial.print("\tAltitud(m):");
     if (bmeOk) Serial.print(altitude, 2); else Serial.print("N/A");
     Serial.print("\tRPM:"); Serial.print(rpm1_suave, 2);
     Serial.println();
   }
+
+  delay(5);
 }
