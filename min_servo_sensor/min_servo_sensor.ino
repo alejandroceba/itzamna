@@ -9,6 +9,14 @@ const int servoPin = D1;
 const int readPin = D2;
 Servo servo;
 
+#define N_PALAS  4          /* Numero de palas del rotor. */
+#define M        0.420      /* Masa total del sistema [kg]. */
+#define R        0.22869    /* Radio exterior del rotor [m]. */
+#define R0       0.04776    /* Radio donde inicia la pala [m]. */
+#define C_CUERDA 0.0204     /* Cuerda de la pala [m]. */
+#define RHO      1.225      /* Densidad del aire [kg/m^3]. */
+#define G        9.81       /* Gravedad [m/s^2]. */
+
 // BME280
 Adafruit_BME280 bme;
 bool bmeOk = false;
@@ -23,6 +31,7 @@ unsigned long t_anterior = 0;
 #define N_PROMEDIO 5
 volatile unsigned long pulsos1 = 0;
 volatile unsigned long t1 = 0;
+volatile unsigned long alpha = 0;
 float buffer1[N_PROMEDIO];
 int indice = 0;
 
@@ -50,7 +59,17 @@ void Task1code(void *pvParameters) {
 
     if (duration > 500 && duration < 2500) {
       int angle = map(duration, 500, 2500, 0, 180);
-      servo.write(angle);
+
+      alpha = servo.read();
+
+      if (angle < 6) {
+        alpha = angle + 1;
+        servo.write(alpha);
+      }
+      else {
+        alpha = angle - 1;
+        servo.write(alpha);
+      }
 
       Serial.print("Input Pulse: ");
       Serial.print(duration);
