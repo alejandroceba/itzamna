@@ -299,8 +299,10 @@ int main(void)
     printf("%s\n", "-----------------------------------------------------------------");
 
     for (int i = 0; i < N_ALPHA; i++) {
-        Vd_eq[i] = sqrt(W / (K_eq * (CL[i] * CL[i] * CL[i])
-                       / (CD[i] * CD[i])));
+        const double clCubedOverCdSquared = (CL[i] * CL[i] * CL[i])
+                                            / (CD[i] * CD[i]);
+
+        Vd_eq[i] = sqrt(W / (K_eq * clCubedOverCdSquared));
 
         /*
          * Clasificacion cualitativa usada en la libreta.
