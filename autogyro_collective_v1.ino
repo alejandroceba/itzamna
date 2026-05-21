@@ -331,9 +331,16 @@ MissionState selectMissionState(float heightAboveGroundM, unsigned long nowMs, f
   }
 
   // While the deploy hold timer is still running, keep the deploy-pulse behavior active.
-  if (!deployReleaseTriggered) { // The deploy pulse is active until the hold timer expires.
-    // Keep the deploy-pulse behavior for the short release window.
-    return DEPLOY_PULSE; // Keep the deploy-pulse behavior for the short release window.
+  // While the deploy hold timer is still running, keep the deploy-pulse behavior active.
+  // The deploy timing and latch are handled here centrally so the deploy pulse
+  // occurs regardless of which control law (legacy or adaptive) will run next.
+  if (deployWindowActive && deployStartMs != 0UL) {
+    // If the hold window has not yet expired, force the deploy pulse state.
+    if ((nowMs - deployStartMs) < (unsigned long)DEPLOY_MAX_PITCH_DURATION_MS) {
+      return DEPLOY_PULSE;
+    }
+    // When the hold time expires, latch the release so normal control continues.
+    deployReleaseTriggered = true;
   }
 
   // Below 20 m AGL the controller should switch to the lower sweep phase.
@@ -373,16 +380,8 @@ long computeLegacyCollectiveBiasUs(MissionState state, float heightAboveGroundM,
 
   // During deploy, keep the blades in deploy pitch while descending at the 200 m deployment point.
   if (state == DEPLOY_PULSE) {
-    // Start the deploy timer the first time the deploy phase is entered.
-    if (deployStartMs == 0UL) {
-      deployStartMs = nowMs;
-    }
-
-    // Once the deploy hold time expires, latch the release flag so the adaptive controller can take over.
-    if (!deployReleaseTriggered && (nowMs - deployStartMs) >= DEPLOY_MAX_PITCH_DURATION_MS) {
-      deployReleaseTriggered = true;
-    }
-    // Return the maximum positive bias while the blades are still deploying.
+    // During the deploy pulse the blades are forced to the deploy pitch.
+    // Timing and latching are handled centrally in `selectMissionState`.
     return maxCollectiveBiasUs;
   }
   ///
@@ -455,10 +454,15 @@ float computeAdaptiveAlphaDeg(float heightAboveGroundM, float descentRateMps, fl
 
   ///CORREGIR
 
-  // Below 20 m the final phase takes over. no, incorrect: below 20 m, optimal delta H is decreased such that ptich can be increased, given rpms are high. however, it is not a bad idea to force max pitch
+  // Below 20 m the final phase takes over. Only force the maximum pitch
+  // if the rotor speed is too low to allow the normal adaptive correction.
   if (heightAboveGroundM <= CONTROL_STAGE_MIN_HEIGHT_M) { // Below 20 m, the final phase takes over.
-    // Force the pitch to the maximum value.
-    return 12.0f; // Force the pitch to the maximum value.
+    // If RPM is invalid or below the practical threshold, force max pitch.
+    if (isnan(rpmNow) || rpmNow < 1300.0f) {
+      return 12.0f;
+    }
+    // Otherwise keep the stored alpha and let the normal logic continue.
+    return alphaStoredDeg;
   }
   ///
 
@@ -541,7 +545,15 @@ void Task1code(void *pvParameters) {
     long requestedBiasUs = 0; // Store the PWM increment or decrement derived from the new pitch step.
     bool usedAdaptiveLogic = false; // Track whether the new control law was applied.
 
-    if (deployWindowActive && !isnan(heightAboveGroundM) && heightAboveGroundM > CONTROL_STAGE_MIN_HEIGHT_M && heightAboveGroundM <= CONTROL_STAGE_MAX_HEIGHT_M) { // Only use the new law after the second 200 m AGL crossing and between 20 m and 200 m AGL.
+    // Deployment always wins over adaptive control while the deploy pulse is active.
+    if (state == DEPLOY_PULSE) { // Force the deploy pitch before any adaptive or fallback logic.
+      // Reuse the legacy deploy bias so the blades stay at the deployment command.
+      requestedBiasUs = computeLegacyCollectiveBiasUs(state, heightAboveGroundM, rpmNow, rpmPrev, nowMs); // Keep the deploy pitch active.
+      // Keep the stored pitch unchanged during deploy.
+      alphaNextDeg = alphaStoredDeg; // Do not advance alpha while deploying.
+      // Mark the deploy branch as handled so no later branch overrides it.
+      usedAdaptiveLogic = true; // Skip adaptive and fallback logic during deploy.
+    } else if (deployWindowActive && !isnan(heightAboveGroundM) && heightAboveGroundM > CONTROL_STAGE_MIN_HEIGHT_M && heightAboveGroundM <= CONTROL_STAGE_MAX_HEIGHT_M) { // Only use the new law after the second 200 m AGL crossing and between 20 m and 200 m AGL.
       // Compute the next alpha using the model and the last stored alpha.
       float adaptiveAlphaDeg = computeAdaptiveAlphaDeg(heightAboveGroundM, descentRateMps, rpmNow, alphaStoredDeg); // Compute the next alpha from the model.
       // Accept the new command only if the model returned a valid result.
@@ -554,12 +566,17 @@ void Task1code(void *pvParameters) {
         usedAdaptiveLogic = true; // Mark that the adaptive controller was used.
       }
     } else if (deployWindowActive && !isnan(heightAboveGroundM) && heightAboveGroundM <= CONTROL_STAGE_MIN_HEIGHT_M) { // Final phase below 20 m AGL after deploy.
-      // Force the pitch to the maximum value once the vehicle reaches the final stage.
-      alphaNextDeg = 12.0f; // Jump directly to the maximum pitch command.
-      // Convert the final-stage step into PWM microseconds.
-      requestedBiasUs = lroundf((alphaNextDeg - alphaStoredDeg) * pitchStepUs); // Convert the final-pitch step into PWM microseconds.
-      // Mark the final-phase logic as active.
-      usedAdaptiveLogic = true; // Mark the final-phase logic as active.
+      // Final-stage behavior: only force maximum pitch if rotor RPM is too low.
+      if (!isnan(rpmNow) && rpmNow < 1300.0f) {
+        alphaNextDeg = 12.0f; // Jump directly to the maximum pitch command.
+        // Convert the final-stage step into PWM microseconds.
+        requestedBiasUs = lroundf((alphaNextDeg - alphaStoredDeg) * pitchStepUs); // Convert the final-pitch step into PWM microseconds.
+        // Mark the final-phase logic as active.
+        usedAdaptiveLogic = true; // Mark the final-phase logic as active.
+      } else {
+        // Do not force pitch; leave alpha unchanged and allow legacy/adaptive logic.
+        alphaNextDeg = alphaStoredDeg;
+      }
     }
 
     // If the new logic could not be used, preserve the current controller as fallback.
